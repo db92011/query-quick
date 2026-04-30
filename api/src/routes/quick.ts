@@ -76,12 +76,19 @@ type AgentCandidate = {
   confidence_score: number;
 };
 
+type DiscoveryLane = {
+  id: string;
+  source: string;
+  focus: string;
+};
+
 type AgentSearchDiagnostics = {
   raw_count: number;
   candidate_count: number;
   verified_count: number;
   soft_verified_count?: number;
   discovery_passes?: number;
+  source_lanes?: string;
   source?: string;
 };
 
@@ -96,6 +103,14 @@ const MAX_AGENT_POOL_RESULTS = 750;
 const ENRICHMENT_BATCH_SIZE = 12;
 const MAX_DISCOVERY_PASSES = 4;
 const DISCOVERY_PROVIDER_TIMEOUT_MS = 65000;
+
+const coreDiscoverySources = [
+  "QueryTracker-style public search results",
+  "Reedsy public agent directory pages",
+  "agency websites and agency submission pages",
+  "Manuscript Wish List and public agent profile pages",
+  "agent interviews, podcast notes, and video guidance",
+];
 
 const allowedFileKinds = new Set([
   "query_letter",
@@ -496,11 +511,40 @@ function candidateToAgent(candidate: AgentCandidate): AgentRecord {
   });
 }
 
+function genreExpansionTerms(body: Record<string, unknown>) {
+  const genre = clean(body.genre);
+  const subgenre = clean(body.subgenre);
+  const combined = `${genre} ${subgenre}`.toLowerCase();
+  const terms = [
+    genre,
+    subgenre,
+    clean(body.category),
+  ].filter(Boolean);
+  if (/upmarket|women|woman|book club|rom-?com|romance|literary|commercial/.test(combined)) {
+    terms.push("women's fiction", "book club fiction", "upmarket fiction", "literary fiction", "commercial fiction", "crossover fiction");
+  }
+  if (/fantasy|speculative|sci[- ]?fi|science fiction|horror|paranormal/.test(combined)) {
+    terms.push("speculative fiction", "fantasy", "science fiction", "horror", "crossover fiction");
+  }
+  if (/thriller|mystery|crime|suspense|noir/.test(combined)) {
+    terms.push("thriller", "mystery", "crime fiction", "suspense", "commercial fiction");
+  }
+  if (/memoir|narrative nonfiction|nonfiction|self-help|business|history|essay/.test(combined)) {
+    terms.push("narrative nonfiction", "memoir", "nonfiction", "prescriptive nonfiction", "proposal-driven nonfiction");
+  }
+  return Array.from(new Set(terms.map((term) => term.toLowerCase()))).slice(0, 12);
+}
+
 function candidateDiscoveryPrompt(body: Record<string, unknown>) {
   const alreadySeen = Array.isArray(body.exclude_agents)
     ? (body.exclude_agents as unknown[]).map(clean).filter(Boolean).slice(0, 450)
     : [];
   const discoveryFocus = clean(body.discovery_focus);
+  const discoveryLane = clean(body.discovery_lane);
+  const discoverySource = clean(body.discovery_source);
+  const expandedTerms = Array.isArray(body.expanded_genres)
+    ? (body.expanded_genres as unknown[]).map(clean).filter(Boolean)
+    : genreExpansionTerms(body);
   const exclusionText = alreadySeen.length
     ? `\nAvoid returning these already-seen agents unless there are no alternatives:\n${alreadySeen.map((agent) => `- ${agent}`).join("\n")}\nKeep searching deeper for different agents beyond this list.`
     : "";
@@ -510,13 +554,16 @@ Genre: ${clean(body.genre)}
 Subgenre: ${clean(body.subgenre)}
 Category: ${clean(body.category)}
 Discovery focus: ${discoveryFocus || "broad genre/subgenre pool"}
+Discovery lane: ${discoveryLane || "general"}
+Preferred source lane: ${discoverySource || coreDiscoverySources.join(", ")}
+Expanded genre boundaries: ${expandedTerms.join(", ")}
 
 Return as many unique agents as you can for this specific focus, aiming for 40-75 useful records in this pass when the public sources support it. Do not stop after a handful of obvious names.
 This is stage one only: discovery and live submission route candidates. Agent Intel will fill missing requirements later.
 Include an agent when you can identify the agent name, agency, genre/subgenre fit, and either a specific submission route, public query email, or a reliable public source/profile page that can lead Agent Intel to the route.
 Do not include closed agents. Do not include QueryTracker/QueryManager pages that say not open, temporarily closed, or not accepting queries.
-Use current public web sources. Prefer QueryTracker, QueryManager, agency submission pages, Manuscript Wish List, and agency profile pages.
-Search beyond the obvious top results and keep going through directories/profile pages so we can build depth over time.
+Use current public web sources. Prefer the source lane above, then expand to ${coreDiscoverySources.join("; ")}.
+Search beyond the obvious top results and keep going through directories/profile pages so we can build depth over time. Treat adjacent categories as valid when the evidence supports the user's project.
 Do not write long explanations. Keep evidence to one short sentence per field.${exclusionText}
 
 Return JSON only in this exact shape:
@@ -745,19 +792,20 @@ async function generateClaudeCandidates(env: Env, body: Record<string, unknown>)
   return candidatesFromRaw(parsed.agents || []);
 }
 
-function discoveryFocuses(body: Record<string, unknown>) {
+function discoveryLanes(body: Record<string, unknown>): DiscoveryLane[] {
   const genre = clean(body.genre) || "this genre";
   const subgenre = clean(body.subgenre) || "this subgenre";
   const category = clean(body.category) || "this category";
+  const expanded = genreExpansionTerms(body).join(", ");
   return [
-    `broad current ${category} ${genre} literary agents accepting ${subgenre}`,
-    `QueryTracker agents open to ${genre} and ${subgenre}`,
-    `QueryManager submission forms for literary agents accepting ${genre} and ${subgenre}`,
-    `Manuscript Wish List agents seeking ${genre} ${subgenre}`,
-    `agency submission pages naming agents open to ${genre} ${subgenre}`,
-    `newer and associate literary agents building lists in ${genre} ${subgenre}`,
-    `independent agencies and boutique agencies accepting ${genre} ${subgenre}`,
-    `deep directory pass for additional open ${genre} ${subgenre} agents not already found`,
+    { id: "broad", source: "public web search across literary agent profiles and directories", focus: `broad current ${category} ${genre} literary agents accepting ${subgenre}; include adjacent fit terms: ${expanded}` },
+    { id: "querytracker", source: "QueryTracker-style public search results and public query-status snippets", focus: `QueryTracker agents open to ${genre}, ${subgenre}, and adjacent subscriber-specific fit terms` },
+    { id: "querymanager", source: "QueryManager public submission pages and agency links", focus: `QueryManager submission forms for literary agents accepting ${genre}, ${subgenre}, or adjacent terms` },
+    { id: "mswl", source: "Manuscript Wish List and public agent wishlist/profile pages", focus: `Manuscript Wish List agents seeking ${genre}, ${subgenre}, and adjacent fit terms` },
+    { id: "agency", source: "agency websites, staff pages, and submission guidelines", focus: `agency submission pages naming agents open to ${genre}, ${subgenre}, and adjacent fit terms` },
+    { id: "newer-agents", source: "new agent announcements, agency staff pages, interviews, and public profiles", focus: `newer and associate literary agents building lists in ${genre}, ${subgenre}, or adjacent fit terms` },
+    { id: "boutique", source: "boutique and independent agency websites", focus: `independent agencies and boutique agencies accepting ${genre}, ${subgenre}, or adjacent fit terms` },
+    { id: "deep-directory", source: "deep public directory/profile search", focus: `deep directory pass for additional open ${genre}, ${subgenre}, and adjacent agents not already found` },
   ].slice(0, MAX_DISCOVERY_PASSES);
 }
 
@@ -780,13 +828,19 @@ async function generateDiscoveryPass(env: Env, body: Record<string, unknown>) {
 
 async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>) {
   const requestedFocus = clean(body.discovery_focus);
-  const focuses = requestedFocus ? [requestedFocus] : discoveryFocuses(body);
+  const requestedLane: DiscoveryLane | null = requestedFocus
+    ? { id: clean(body.discovery_lane) || "requested", source: clean(body.discovery_source) || "requested source lane", focus: requestedFocus }
+    : null;
+  const lanes = requestedLane ? [requestedLane] : discoveryLanes(body);
   const baseExcludeAgents = Array.isArray(body.exclude_agents)
     ? (body.exclude_agents as unknown[]).map(clean).filter(Boolean)
     : [];
-  const passResults = await Promise.allSettled(focuses.map((focus) => generateDiscoveryPass(env, {
+  const passResults = await Promise.allSettled(lanes.map((lane) => generateDiscoveryPass(env, {
     ...body,
-    discovery_focus: focus,
+    discovery_lane: lane.id,
+    discovery_source: lane.source,
+    discovery_focus: lane.focus,
+    expanded_genres: genreExpansionTerms(body),
     exclude_agents: baseExcludeAgents.slice(0, 450),
   })));
   const fulfilled = passResults
@@ -806,6 +860,7 @@ async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>
       verified_count: agents.length,
       soft_verified_count: fulfilled.reduce((sum, result) => sum + (result.value.diagnostics.soft_verified_count || 0), 0),
       discovery_passes: fulfilled.length,
+      source_lanes: lanes.map((lane) => lane.id).join(","),
       source: "provider_pool",
     },
   };

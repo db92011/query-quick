@@ -39,6 +39,33 @@ npm run check
 
 Do not deploy this through the old `query-salon-api` Worker. Do not reuse Query Salon storage for Query Quick user state.
 
+## Agent Discovery Frame
+
+Query Quick is not a one-shot "find every agent" prompt. It is a subscriber-specific discovery and normalization engine.
+
+The runtime frame:
+
+1. Start with the subscriber profile: genre, subgenre, category, and project language.
+2. Expand only that subscriber's genre boundary into adjacent fit terms.
+3. Load stored open/selective agents from the warm pool first.
+4. Run source lanes one at a time:
+   - broad public agent/profile search
+   - QueryTracker-style public search results
+   - QueryManager public pages
+   - Manuscript Wish List/public wishlist pages
+   - agency websites and submission pages
+   - newer/associate agent announcements and profiles
+   - boutique/independent agency pages
+   - deep public directory/profile pass
+5. Normalize each lane into structured agent records.
+6. Deduplicate by agent plus agency.
+7. Keep discovered agents in the master pool, even if they are not sent.
+8. Mark `seen_before` only when the writer actually sends or marks a query sent.
+9. Let cron refresh open/closed state so stored agents can re-enter future searches when their green light comes back on.
+10. Stop a live run when source lanes stop producing new agents, then use Agent Intel as the second pass for requirements and route confidence.
+
+The product value is not just finding agents. The product value is finding, verifying, structuring, refreshing, and making agents actionable from the writer's kit.
+
 ## Secrets
 
 Use KeyMaster and the local lockbox for secret-bearing work. Do not put raw secrets into repo files.

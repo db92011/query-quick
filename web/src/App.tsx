@@ -203,19 +203,47 @@ const agentSearchActivity = [
   "Preparing Intel-ready results.",
 ];
 
-function discoveryFocuses(profile: Profile) {
+type DiscoveryLane = {
+  id: string;
+  source: string;
+  focus: string;
+};
+
+function genreExpansionTerms(profile: Profile) {
   const genre = profile.genre.trim() || "this genre";
   const subgenre = profile.subgenre.trim() || "this subgenre";
   const category = profile.category.trim() || "this category";
+  const combined = `${genre} ${subgenre}`.toLowerCase();
+  const terms = [genre, subgenre, category];
+  if (/upmarket|women|woman|book club|rom-?com|romance|literary|commercial/.test(combined)) {
+    terms.push("women's fiction", "book club fiction", "upmarket fiction", "literary fiction", "commercial fiction", "crossover fiction");
+  }
+  if (/fantasy|speculative|sci[- ]?fi|science fiction|horror|paranormal/.test(combined)) {
+    terms.push("speculative fiction", "fantasy", "science fiction", "horror", "crossover fiction");
+  }
+  if (/thriller|mystery|crime|suspense|noir/.test(combined)) {
+    terms.push("thriller", "mystery", "crime fiction", "suspense", "commercial fiction");
+  }
+  if (/memoir|narrative nonfiction|nonfiction|self-help|business|history|essay/.test(combined)) {
+    terms.push("narrative nonfiction", "memoir", "nonfiction", "prescriptive nonfiction", "proposal-driven nonfiction");
+  }
+  return Array.from(new Set(terms.map((term) => term.toLowerCase()))).slice(0, 12);
+}
+
+function discoveryLanes(profile: Profile): DiscoveryLane[] {
+  const genre = profile.genre.trim() || "this genre";
+  const subgenre = profile.subgenre.trim() || "this subgenre";
+  const category = profile.category.trim() || "this category";
+  const expanded = genreExpansionTerms(profile).join(", ");
   return [
-    `broad current ${category} ${genre} literary agents accepting ${subgenre}`,
-    `QueryTracker agents open to ${genre} and ${subgenre}`,
-    `QueryManager submission forms for literary agents accepting ${genre} and ${subgenre}`,
-    `Manuscript Wish List agents seeking ${genre} ${subgenre}`,
-    `agency submission pages naming agents open to ${genre} ${subgenre}`,
-    `newer and associate literary agents building lists in ${genre} ${subgenre}`,
-    `independent agencies and boutique agencies accepting ${genre} ${subgenre}`,
-    `deep directory pass for additional open ${genre} ${subgenre} agents not already found`,
+    { id: "broad", source: "public web search across literary agent profiles and directories", focus: `broad current ${category} ${genre} literary agents accepting ${subgenre}; include adjacent fit terms: ${expanded}` },
+    { id: "querytracker", source: "QueryTracker-style public search results and public query-status snippets", focus: `QueryTracker agents open to ${genre}, ${subgenre}, and adjacent subscriber-specific fit terms` },
+    { id: "querymanager", source: "QueryManager public submission pages and agency links", focus: `QueryManager submission forms for literary agents accepting ${genre}, ${subgenre}, or adjacent terms` },
+    { id: "mswl", source: "Manuscript Wish List and public agent wishlist/profile pages", focus: `Manuscript Wish List agents seeking ${genre}, ${subgenre}, and adjacent fit terms` },
+    { id: "agency", source: "agency websites, staff pages, and submission guidelines", focus: `agency submission pages naming agents open to ${genre}, ${subgenre}, and adjacent fit terms` },
+    { id: "newer-agents", source: "new agent announcements, agency staff pages, interviews, and public profiles", focus: `newer and associate literary agents building lists in ${genre}, ${subgenre}, or adjacent fit terms` },
+    { id: "boutique", source: "boutique and independent agency websites", focus: `independent agencies and boutique agencies accepting ${genre}, ${subgenre}, or adjacent fit terms` },
+    { id: "deep-directory", source: "deep public directory/profile search", focus: `deep directory pass for additional open ${genre}, ${subgenre}, and adjacent agents not already found` },
   ];
 }
 
@@ -925,12 +953,13 @@ ${profile.name || ""}`;
     setIsSearching(true);
     setAgents([]);
     setStatus("Starting live agent download...");
-    const focuses = discoveryFocuses(profile);
+    const lanes = discoveryLanes(profile);
     let downloaded: AgentRecord[] = [];
     let successfulPasses = 0;
+    let emptyLanes = 0;
     try {
-      for (const [index, discovery_focus] of focuses.entries()) {
-        setStatus(`Searching source lane ${index + 1}/${focuses.length}. ${downloaded.length} agents downloaded so far.`);
+      for (const [index, lane] of lanes.entries()) {
+        setStatus(`Searching ${lane.id} lane ${index + 1}/${lanes.length}. ${downloaded.length} agents downloaded so far.`);
         try {
           const discovered = await api<{
             agents: AgentRecord[];
@@ -940,15 +969,24 @@ ${profile.name || ""}`;
             method: "POST",
             body: JSON.stringify({
               ...profile,
-              discovery_focus,
+              discovery_lane: lane.id,
+              discovery_source: lane.source,
+              discovery_focus: lane.focus,
+              expanded_genres: genreExpansionTerms(profile),
               include_stored_pool: index === 0,
               exclude_agents: downloaded.map((agent) => `${agent.agent_name} — ${agent.agency}`),
             }),
           }, session.token);
           successfulPasses += 1;
+          const beforeCount = downloaded.length;
           downloaded = mergeAgentPools(downloaded, discovered.agents);
+          emptyLanes = downloaded.length === beforeCount ? emptyLanes + 1 : 0;
           setAgents(downloaded);
           setStatus(`${downloaded.length} agents downloaded live across ${successfulPasses} source lanes. Still searching...`);
+          if (downloaded.length && emptyLanes >= 2) {
+            setStatus(`${downloaded.length} agents downloaded. Search saturated after ${successfulPasses} source lanes.`);
+            break;
+          }
         } catch {
           setStatus(`${downloaded.length} agents downloaded. One source lane stalled, moving to the next.`);
         }
