@@ -209,6 +209,15 @@ type DiscoveryLane = {
   focus: string;
 };
 
+type AgentSearchDiagnostics = {
+  raw_count?: number;
+  candidate_count?: number;
+  verified_count?: number;
+  discovery_passes?: number;
+  source_lanes?: string;
+  source?: string;
+};
+
 function genreExpansionTerms(profile: Profile) {
   const genre = profile.genre.trim() || "this genre";
   const subgenre = profile.subgenre.trim() || "this subgenre";
@@ -255,6 +264,16 @@ function mergeAgentPools(current: AgentRecord[], incoming: AgentRecord[]) {
     seen.add(key);
     return true;
   });
+}
+
+function discoveryProgressText(total: number, lane: DiscoveryLane, diagnostics?: AgentSearchDiagnostics) {
+  const raw = diagnostics?.raw_count || 0;
+  const candidates = diagnostics?.candidate_count || 0;
+  const accepted = diagnostics?.verified_count || 0;
+  if (raw || candidates || accepted) {
+    return `${total} agents showing. ${lane.id} found ${raw} raw, kept ${candidates}, added ${accepted}. Continuing source checks...`;
+  }
+  return `${total} agents showing. ${lane.id} did not return usable names yet; checking the next source.`;
 }
 
 function countWords(value: string) {
@@ -952,19 +971,19 @@ ${profile.name || ""}`;
     }
     setIsSearching(true);
     setAgents([]);
-    setStatus("Starting live agent download...");
+    setStatus("Starting live agent discovery...");
     const lanes = discoveryLanes(profile);
     let downloaded: AgentRecord[] = [];
     let successfulPasses = 0;
     let emptyLanes = 0;
     try {
       for (const [index, lane] of lanes.entries()) {
-        setStatus(`Searching ${lane.id} lane ${index + 1}/${lanes.length}. ${downloaded.length} agents downloaded so far.`);
+        setStatus(`Searching ${lane.id} lane ${index + 1}/${lanes.length}. ${downloaded.length} agents showing so far.`);
         try {
           const discovered = await api<{
             agents: AgentRecord[];
             cached?: boolean;
-            diagnostics?: { raw_count: number; candidate_count: number; verified_count: number; discovery_passes?: number };
+            diagnostics?: AgentSearchDiagnostics;
           }>("/api/agents/discover", {
             method: "POST",
             body: JSON.stringify({
@@ -982,13 +1001,14 @@ ${profile.name || ""}`;
           downloaded = mergeAgentPools(downloaded, discovered.agents);
           emptyLanes = downloaded.length === beforeCount ? emptyLanes + 1 : 0;
           setAgents(downloaded);
-          setStatus(`${downloaded.length} agents found so far. Still checking more sources...`);
+          setStatus(discoveryProgressText(downloaded.length, lane, discovered.diagnostics));
           if (downloaded.length && emptyLanes >= 2) {
             setStatus(`${downloaded.length} agents found. No new matches appeared in the last sources checked.`);
             break;
           }
-        } catch {
-          setStatus(`${downloaded.length} agents found so far. One source did not respond, checking the next one.`);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "One source did not respond";
+          setStatus(`${downloaded.length} agents showing. ${lane.id} needs another pass: ${reason}`);
         }
       }
       setStatus(downloaded.length

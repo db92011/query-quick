@@ -165,6 +165,11 @@ function validUrl(value: string | undefined) {
   }
 }
 
+function fallbackAgentSourceUrl(agentName: string, agency: string) {
+  const query = encodeURIComponent([agentName, agency, "literary agent submissions"].filter(Boolean).join(" "));
+  return `https://www.google.com/search?q=${query}`;
+}
+
 function filterAgents(agents: AgentRecord[]) {
   return agents.filter((agent) => {
     if (!agent.agent_name || !agent.agency || !agent.genre_fit || !agent.requirements_summary) return false;
@@ -484,6 +489,11 @@ function extractJsonText(value: string) {
 }
 
 function candidateToAgent(candidate: AgentCandidate): AgentRecord {
+  const sourceUrl = validUrl(candidate.source_url)
+    ? candidate.source_url
+    : validUrl(candidate.submission_url)
+      ? candidate.submission_url || ""
+      : fallbackAgentSourceUrl(candidate.agent_name, candidate.agency);
   return normalizeAgent({
     agent_name: candidate.agent_name,
     agency: candidate.agency,
@@ -500,13 +510,16 @@ function candidateToAgent(candidate: AgentCandidate): AgentRecord {
     requirements_summary: "Building Agent Intel...",
     required_materials: ["query_letter"],
     open_status: candidate.open_status,
-    source_url: candidate.source_url,
-    source_urls: candidate.source_urls || [candidate.source_url],
+    source_url: sourceUrl,
+    source_urls: Array.from(new Set([
+      sourceUrl,
+      ...(Array.isArray(candidate.source_urls) ? candidate.source_urls : []),
+    ])).filter(validUrl),
     verification_notes: "Live candidate discovered; Query Quick is building Agent Intel.",
     submission_route_verified: false,
     submission_route_notes: "Stage-one download kept this source-backed route. Agent Intel must confirm the exact requirements before sending.",
-    last_verified: candidate.last_verified,
-    confidence_score: candidate.confidence_score,
+    last_verified: clean(candidate.last_verified) || new Date().toISOString().slice(0, 10),
+    confidence_score: Number(candidate.confidence_score || 45),
     intel_pending: true,
   });
 }
@@ -612,7 +625,7 @@ async function candidatesFromRaw(rawAgents: AgentCandidate[]) {
   const filtered = candidates.filter((agent) => {
     if (!agent.agent_name || !agent.agency) return false;
     if (!["open", "selective"].includes(agent.open_status)) return false;
-    if (Number(agent.confidence_score || 0) < 45) return false;
+    if (Number(agent.confidence_score || 0) < 20) return false;
     if (agent.query_method === "email") return /\S+@\S+\.\S+/.test(agent.public_email || "");
     return validUrl(agent.submission_url) || validUrl(agent.source_url);
   });
