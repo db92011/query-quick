@@ -943,12 +943,22 @@ a.secondary-button {
 }
 
 .research-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 10px;
   padding: 10px 12px;
   border: 1px solid var(--line);
   background: #fbfaf7;
   color: var(--muted);
   font-size: 13px;
+}
+
+.research-note strong {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 12px;
 }
 
 .agent-list {
@@ -1144,6 +1154,19 @@ a.secondary-button {
   color: var(--accent);
   font-weight: 700;
   text-decoration: none;
+}
+
+.modal-requirements {
+  margin-top: 22px;
+}
+
+.intel-actions {
+  margin-top: 24px;
+  justify-content: flex-start;
+}
+
+.intel-actions button {
+  min-height: 42px;
 }
 
 .specific-list {

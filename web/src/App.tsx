@@ -181,6 +181,8 @@ const packetOrder: PacketKey[] = [
   "manuscript_status",
 ];
 
+const maxConcurrentIntel = 2;
+
 const agentSearchActivity = [
   "Opening public agent records.",
   "Checking live submission paths.",
@@ -570,7 +572,7 @@ function Workspace() {
   const [sentCount, setSentCount] = useState(() => Number(localStorage.getItem("query-quick.sent") || "0"));
   const [status, setStatus] = useState("Ready.");
   const [isSearching, setIsSearching] = useState(false);
-  const [intelLoadingKey, setIntelLoadingKey] = useState("");
+  const [intelLoadingKeys, setIntelLoadingKeys] = useState<string[]>([]);
   const [activityIndex, setActivityIndex] = useState(0);
   const [kitSaved, setKitSaved] = useState(() => localStorage.getItem("query-quick.kit-saved") === "true");
   const [intelAgent, setIntelAgent] = useState<AgentRecord | null>(null);
@@ -697,6 +699,10 @@ ${body}`;
 
   function canOpenSubmissionRoute(agent: AgentRecord) {
     return (agent.query_method === "email" && Boolean(agent.public_email)) || (validHttpUrl(agent.submission_url) && agent.submission_route_verified !== false);
+  }
+
+  function agentKey(agent: AgentRecord) {
+    return `${agent.agent_name}-${agent.agency}`;
   }
 
   function agentReadyForSubmission(agent: AgentRecord) {
@@ -884,8 +890,13 @@ ${profile.name || ""}`;
 
   async function runAgentIntel(agent: AgentRecord) {
     if (!session) return;
-    const key = `${agent.agent_name}-${agent.agency}`;
-    setIntelLoadingKey(key);
+    const key = agentKey(agent);
+    if (intelLoadingKeys.includes(key)) return;
+    if (intelLoadingKeys.length >= maxConcurrentIntel) {
+      setStatus("Run Agent Intel two at a time so the search stays accurate and responsive.");
+      return;
+    }
+    setIntelLoadingKeys((current) => current.includes(key) ? current : [...current, key].slice(0, maxConcurrentIntel));
     setStatus(`Building Agent Intel for ${agent.agent_name}...`);
     try {
       const response = await api<{
@@ -907,7 +918,7 @@ ${profile.name || ""}`;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : `Could not build Agent Intel for ${agent.agent_name}.`);
     } finally {
-      setIntelLoadingKey("");
+      setIntelLoadingKeys((current) => current.filter((item) => item !== key));
     }
   }
 
@@ -1091,8 +1102,8 @@ ${profile.name || ""}`;
             <div className="main-actions" aria-label="Agent search actions">
               <button className="primary-button action-button" type="button" disabled={isSearching} onClick={findAgents}>Find matching agents</button>
               <div className="agent-action-note">
-                <p>If an agent requires email, click Start Email—we’ll automatically fill it out using your materials and their requirements.</p>
-                <p>If it’s a QueryManager, QueryTracker, portal, or personal website form, click through and everything will be ready to paste—already structured to match their submission.</p>
+                <p>Find matching agents downloads the pool from your profile criteria. Then run Agent Intel on up to two agents at a time.</p>
+                <p>Email routes open a prefilled draft. QueryTracker, QueryManager, portals, and personal website forms copy the right kit pieces and open the route in another tab.</p>
               </div>
             </div>
           ) : null}
@@ -1240,10 +1251,16 @@ ${profile.name || ""}`;
 
             {sortedAgents.length ? (
               <>
-                <div className="research-note">Review each source before sending.</div>
+                <div className="research-note">
+                  <span>Downloaded agents stay lightweight until you click Intel.</span>
+                  <strong>Agent Intel running: {intelLoadingKeys.length}/{maxConcurrentIntel}</strong>
+                </div>
                 <div className="agent-list">
-                  {sortedAgents.map((agent) => (
-                    <article className="agent-row" key={`${agent.agent_name}-${agent.agency}`}>
+                  {sortedAgents.map((agent) => {
+                    const isIntelLoading = intelLoadingKeys.includes(agentKey(agent));
+                    const intelLimitReached = intelLoadingKeys.length >= maxConcurrentIntel && !isIntelLoading;
+                    return (
+                    <article className="agent-row" key={agentKey(agent)}>
                       <div className="agent-main">
                         <div className="agent-title">
                           <div>
@@ -1282,10 +1299,10 @@ ${profile.name || ""}`;
                         <button
                           className="secondary-button"
                           type="button"
-                          disabled={intelLoadingKey === `${agent.agent_name}-${agent.agency}`}
+                          disabled={isIntelLoading || intelLimitReached}
                           onClick={() => agentNeedsIntel(agent) ? runAgentIntel(agent) : setIntelAgent(agent)}
                         >
-                          {intelLoadingKey === `${agent.agent_name}-${agent.agency}` ? "Intel..." : "Intel"}
+                          {isIntelLoading ? "Intel..." : intelLimitReached ? "Two running" : "Intel"}
                         </button>
                         {agent.query_method === "email" && agent.public_email ? (
                           <button className="secondary-button" type="button" onClick={() => emailAgent(agent)}>Start Email</button>
@@ -1297,7 +1314,7 @@ ${profile.name || ""}`;
                         <button className="secondary-button" type="button" onClick={() => markSent(agent)}>Mark Sent</button>
                       </div>
                     </article>
-                  ))}
+                  );})}
                 </div>
               </>
             ) : (
@@ -1455,7 +1472,25 @@ ${profile.name || ""}`;
                 </a>
               ))}
             </div>
-            <p className="modal-note">Use these public sources to check preferences, interviews, videos, podcasts, and current submission instructions before sending.</p>
+            {intelAgent.required_materials?.length ? (
+              <div className="requirements-list modal-requirements" aria-label="Agent Intel required materials">
+                {intelAgent.required_materials.map((material) => (
+                  <span key={material}>{materialLabels[material] || material}</span>
+                ))}
+              </div>
+            ) : null}
+            <div className="modal-actions intel-actions">
+              <button className="secondary-button" type="button" onClick={() => copyRequiredKit(intelAgent)}>Copy Required Kit</button>
+              {intelAgent.query_method === "email" && intelAgent.public_email ? (
+                <button className="primary-button" type="button" onClick={() => emailAgent(intelAgent)}>Start Email</button>
+              ) : (
+                <button className="primary-button" type="button" disabled={!canOpenSubmissionRoute(intelAgent)} onClick={() => openSubmissionWithKit(intelAgent)}>
+                  {canOpenSubmissionRoute(intelAgent) ? routeActionWithKitLabel(intelAgent) : "Route unavailable"}
+                </button>
+              )}
+              <button className="secondary-button" type="button" onClick={() => markSent(intelAgent)}>Mark Sent</button>
+            </div>
+            <p className="modal-note">Use these public sources to check preferences and current submission instructions before sending. If a form blocks autofill, use Copy Required Kit, switch tabs, and paste each requested piece.</p>
           </section>
         </div>
       ) : null}
