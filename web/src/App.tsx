@@ -607,6 +607,25 @@ function Workspace() {
   }, [queriedAgents]);
 
   useEffect(() => {
+    if (!session) return;
+    let cancelled = false;
+    api<{ profile: Partial<Profile> | null }>("/api/profile", undefined, session.token)
+      .then((response) => {
+        if (cancelled || !response.profile) return;
+        setProfile((current) => {
+          const hasLocalProfile = Boolean(current.genre.trim() || current.subgenre.trim() || current.category.trim() || current.book_title.trim());
+          return hasLocalProfile ? current : { ...emptyProfile, ...response.profile };
+        });
+      })
+      .catch(() => {
+        // Local profile storage remains usable if the saved server profile cannot be loaded.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session]);
+
+  useEffect(() => {
     if (!isSearching) return;
     setActivityIndex(0);
     const timer = window.setInterval(() => {
@@ -622,10 +641,24 @@ function Workspace() {
     setProfile((current) => ({ ...current, [key]: value }));
   }
 
-  function saveProfile() {
+  async function saveProfile() {
     localStorage.setItem("query-quick.profile", JSON.stringify(profile));
-    setStatus("Profile saved. Ready to search.");
-    setActiveView("search");
+    if (!session) {
+      setStatus("Profile saved locally. Sign in to save it to Query Quick.");
+      setActiveView("search");
+      return;
+    }
+    try {
+      await api("/api/profile", {
+        method: "POST",
+        body: JSON.stringify(profile),
+      }, session.token);
+      setStatus("Profile saved. Ready to search.");
+      setActiveView("search");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Profile saved locally, but could not sync to Query Quick.");
+      setActiveView("search");
+    }
   }
 
   function updateSubmissionKit(key: keyof SubmissionKit, value: string | boolean) {
