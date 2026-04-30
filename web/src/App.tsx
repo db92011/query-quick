@@ -941,6 +941,7 @@ ${profile.name || ""}`;
             body: JSON.stringify({
               ...profile,
               discovery_focus,
+              include_stored_pool: index === 0,
               exclude_agents: downloaded.map((agent) => `${agent.agent_name} — ${agent.agency}`),
             }),
           }, session.token);

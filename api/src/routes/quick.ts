@@ -1196,6 +1196,33 @@ function rowToIntelAgent(row: {
   });
 }
 
+async function storedOpenAgentPool(env: Env, body: Record<string, unknown>) {
+  const genre = clean(body.genre).toLowerCase();
+  if (!genre) return [];
+  const genreLike = `%${genre}%`;
+  const rows = await all<Parameters<typeof rowToIntelAgent>[0]>(
+    env.DB,
+    `SELECT agent_name, agency, genre_fit, matched_genre, matched_subgenre, genre_evidence, subgenre_evidence,
+            fit_reason, query_method, submission_url, public_email, requirements_summary, email_opener,
+            open_status, source_url, source_urls_json, verification_notes, required_materials_json,
+            submission_route_verified, submission_route_verified_at, submission_route_status,
+            submission_route_notes, last_verified, confidence_score
+     FROM quick_agents
+     WHERE open_status IN ('open', 'selective')
+       AND (
+         lower(genre_fit) LIKE ?1 OR
+         lower(matched_genre) LIKE ?1 OR
+         lower(genre_evidence) LIKE ?1 OR
+         lower(subgenre_evidence) LIKE ?1 OR
+         lower(fit_reason) LIKE ?1
+       )
+     ORDER BY submission_route_verified DESC, last_seen_at DESC
+     LIMIT 250`,
+    [genreLike]
+  );
+  return rows.map(rowToIntelAgent);
+}
+
 export async function handleAgentIntelRefresh(env: Env) {
   const rows = await all<{
     id: string;
@@ -1326,12 +1353,14 @@ export async function handleAgentDiscover(request: Request, env: Env) {
 
   const key = cacheKey(body);
   const seenKeys = await userSeenAgentKeys(env, session.user.id);
+  const storedAgents = body.include_stored_pool === false ? [] : await storedOpenAgentPool(env, body);
   const liveDiscovered = await generateLiveCandidatePool(env, body);
   const discovered: { agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics } = {
-    agents: liveDiscovered.agents,
+    agents: dedupeAgents([...storedAgents, ...liveDiscovered.agents]),
     diagnostics: {
       ...liveDiscovered.diagnostics,
-      source: "live_full_pool",
+      verified_count: dedupeAgents([...storedAgents, ...liveDiscovered.agents]).length,
+      source: storedAgents.length ? "stored_plus_live_pool" : "live_full_pool",
     },
   };
   const agents = markSeenBefore(dedupeAgents(discovered.agents), seenKeys).map((agent) => ({
