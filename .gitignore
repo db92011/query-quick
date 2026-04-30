@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.wrangler/
+
+api/node_modules/
+web/node_modules/
+web/dist/

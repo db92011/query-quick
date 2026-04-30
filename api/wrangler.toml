@@ -1,0 +1,23 @@
+name = "query-quick-api"
+main = "src/index.ts"
+compatibility_date = "2026-04-26"
+
+[triggers]
+crons = ["*/30 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "query_quick"
+database_id = "74d2f67e-7fb8-4d50-949b-91ee25d6d0f6"
+
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "query-quick-files"
+preview_bucket_name = "query-quick-files-preview"
+
+[vars]
+APP_ORIGIN = "https://querysalon.com"
+
+[[routes]]
+pattern = "quick-api.querysalon.com"
+custom_domain = true
