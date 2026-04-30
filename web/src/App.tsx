@@ -982,18 +982,18 @@ ${profile.name || ""}`;
           downloaded = mergeAgentPools(downloaded, discovered.agents);
           emptyLanes = downloaded.length === beforeCount ? emptyLanes + 1 : 0;
           setAgents(downloaded);
-          setStatus(`${downloaded.length} agents downloaded live across ${successfulPasses} source lanes. Still searching...`);
+          setStatus(`${downloaded.length} agents found so far. Still checking more sources...`);
           if (downloaded.length && emptyLanes >= 2) {
-            setStatus(`${downloaded.length} agents downloaded. Search saturated after ${successfulPasses} source lanes.`);
+            setStatus(`${downloaded.length} agents found. No new matches appeared in the last sources checked.`);
             break;
           }
         } catch {
-          setStatus(`${downloaded.length} agents downloaded. One source lane stalled, moving to the next.`);
+          setStatus(`${downloaded.length} agents found so far. One source did not respond, checking the next one.`);
         }
       }
       setStatus(downloaded.length
-        ? `${downloaded.length} agents downloaded. Click Run Intel to fill requirements.`
-        : "No agents came back from the live source lanes. Try again in a moment.");
+        ? `${downloaded.length} agents found. Use Run Intel on an agent when you are ready to prepare that submission.`
+        : "No matching agents came back yet. Try again in a moment.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Still checking live sources. Try again in a moment to pull in more agents.");
     } finally {
@@ -1215,8 +1215,8 @@ ${profile.name || ""}`;
             <div className="main-actions" aria-label="Agent search actions">
               <button className="primary-button action-button" type="button" disabled={isSearching} onClick={findAgents}>Find matching agents</button>
               <div className="agent-action-note">
-                <p>Find matching agents downloads the pool from your profile criteria. Then run Agent Intel on up to two agents at a time.</p>
-                <p>Email routes open a prefilled draft. QueryTracker, QueryManager, portals, and personal website forms copy the right kit pieces and open the route in another tab.</p>
+                <p>Find matching agents builds a working list from your book profile and current public submission sources.</p>
+                <p>Run Intel on an agent when you want Query Quick to prepare the exact submission route, required materials, and next action.</p>
               </div>
             </div>
           ) : null}
@@ -1365,7 +1365,7 @@ ${profile.name || ""}`;
             {sortedAgents.length ? (
               <>
                 <div className="research-note">
-                  <span>Downloaded agents stay lightweight until you click Intel.</span>
+                  <span>Agents are listed first. Run Intel when you want submission-ready details.</span>
                   <strong>Agent Intel running: {intelLoadingKeys.length}/{maxConcurrentIntel}</strong>
                 </div>
                 <div className="agent-list">
