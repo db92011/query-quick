@@ -2,8 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { Navigate, Route, Routes, useNavigate, useSearchParams } from "react-router-dom";
 import { api, AuthProvider, type Session, uploadFile, useAuth } from "./lib";
 
-const STRIPE_PAYMENT_LINK = "https://buy.stripe.com/5kQdR91hh1oX1qF4P94ow04";
-
 type AgentRecord = {
   id?: string;
   agent_name: string;
@@ -230,8 +228,9 @@ function Header({ workspace = false }: { workspace?: boolean }) {
   const { session, logout } = useAuth();
   const navigate = useNavigate();
 
-  function startCheckout() {
-    window.location.href = STRIPE_PAYMENT_LINK;
+  async function startCheckout() {
+    const response = await api<{ url: string }>("/api/billing/checkout", { method: "POST" });
+    window.location.href = response.url;
   }
 
   async function openBilling() {
@@ -263,11 +262,18 @@ function Header({ workspace = false }: { workspace?: boolean }) {
 function Home() {
   const [waitlistEmail, setWaitlistEmail] = useState("");
   const [waitlistError, setWaitlistError] = useState("");
+  const [checkoutError, setCheckoutError] = useState("");
   const [showHow, setShowHow] = useState(false);
   const [showWaitlistThanks, setShowWaitlistThanks] = useState(false);
 
-  function checkout() {
-    window.location.href = STRIPE_PAYMENT_LINK;
+  async function checkout() {
+    setCheckoutError("");
+    try {
+      const response = await api<{ url: string }>("/api/billing/checkout", { method: "POST" });
+      window.location.href = response.url;
+    } catch (error) {
+      setCheckoutError(error instanceof Error ? error.message : "Could not open checkout.");
+    }
   }
 
   useEffect(() => {
@@ -311,6 +317,7 @@ function Home() {
           <button className="primary-button large" type="button" onClick={checkout}>Start Query Quick - $9.95/mo</button>
           <button className="secondary-button large" type="button" onClick={() => setShowHow(true)}>See how it works</button>
         </div>
+        {checkoutError ? <p className="status-line">{checkoutError}</p> : null}
         <p className="fine-print">Payments are handled by Stripe.<br />We only store what's required to keep your account working.</p>
       </section>
 
