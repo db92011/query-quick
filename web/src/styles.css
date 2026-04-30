@@ -472,13 +472,18 @@ a.secondary-button {
 }
 
 .workspace-shell {
+  height: 100vh;
   min-height: 100vh;
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
   background: var(--paper);
+  overflow: hidden;
 }
 
 .sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -537,8 +542,11 @@ a.secondary-button {
 
 .main-content {
   width: min(1240px, calc(100% - 72px));
+  height: 100vh;
   margin: 0 auto;
   padding: 56px 0 72px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .main-header {
@@ -1605,13 +1613,17 @@ a.secondary-button {
   }
 
   .workspace-shell {
+    height: auto;
+    min-height: 100vh;
     display: block;
+    overflow: visible;
   }
 
   .sidebar {
     position: sticky;
     top: 0;
     z-index: 30;
+    height: auto;
     min-height: 0;
     display: block;
     padding: 14px 16px;
@@ -1644,6 +1656,8 @@ a.secondary-button {
 
   .main-content {
     width: min(100% - 32px, 720px);
+    height: auto;
+    overflow: visible;
     padding: 32px 0 72px;
   }
 
