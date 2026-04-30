@@ -34,7 +34,8 @@ npm run check
 - Worker name: `query-quick-api`
 - D1 database: `query_quick`
 - R2 bucket: `query-quick-files`
-- API route: `quick-api.querysalon.com`
+- API custom domain: `quick-api.querysalon.com`
+- Pages project: `query-quick`
 
 Do not deploy this through the old `query-salon-api` Worker. Do not reuse Query Salon storage for Query Quick user state.
 
