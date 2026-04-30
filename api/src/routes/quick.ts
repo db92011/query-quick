@@ -662,57 +662,6 @@ async function generateAgentCandidates(env: Env, body: Record<string, unknown>) 
   if (!env.OPENAI_API_KEY) throw badRequest("Agent search is not configured yet. Missing OPENAI_API_KEY.", 503);
   const prompt = candidateDiscoveryPrompt(body);
 
-  const schema = {
-    type: "object",
-    additionalProperties: false,
-    required: ["agents"],
-    properties: {
-      agents: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: [
-            "agent_name",
-            "agency",
-            "genre_fit",
-            "matched_genre",
-            "matched_subgenre",
-            "genre_evidence",
-            "subgenre_evidence",
-            "fit_reason",
-            "query_method",
-            "submission_url",
-            "public_email",
-            "open_status",
-            "source_url",
-            "source_urls",
-            "last_verified",
-            "confidence_score",
-          ],
-          properties: {
-            agent_name: { type: "string" },
-            agency: { type: "string" },
-            genre_fit: { type: "string" },
-            matched_genre: { type: "string" },
-            matched_subgenre: { type: "string" },
-            genre_evidence: { type: "string" },
-            subgenre_evidence: { type: "string" },
-            fit_reason: { type: "string" },
-            query_method: { type: "string", enum: ["email", "querytracker", "querymanager", "form", "portal"] },
-            submission_url: { type: "string" },
-            public_email: { type: "string" },
-            open_status: { type: "string", enum: ["open", "selective"] },
-            source_url: { type: "string" },
-            source_urls: { type: "array", items: { type: "string" } },
-            last_verified: { type: "string" },
-            confidence_score: { type: "integer" },
-          },
-        },
-      },
-    },
-  };
-
   let response: Response;
   const timeout = timeoutSignal(DISCOVERY_PROVIDER_TIMEOUT_MS);
   try {
@@ -724,7 +673,7 @@ async function generateAgentCandidates(env: Env, body: Record<string, unknown>) 
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: clean(env.OPENAI_MODEL) || "gpt-5-mini",
+        model: clean(env.OPENAI_MODEL) || "gpt-4.1-mini",
         tools: [{ type: "web_search_preview" }],
         input: [
           {
@@ -734,14 +683,6 @@ async function generateAgentCandidates(env: Env, body: Record<string, unknown>) 
           { role: "user", content: prompt },
         ],
         max_output_tokens: 8000,
-        text: {
-          format: {
-            type: "json_schema",
-            name: "query_quick_agent_candidates",
-            strict: true,
-            schema,
-          },
-        },
       }),
     });
   } catch (error) {
@@ -749,9 +690,12 @@ async function generateAgentCandidates(env: Env, body: Record<string, unknown>) 
   } finally {
     timeout.clear();
   }
-  const data = await response.json() as { error?: { message?: string } };
+  const data = await response.json() as { error?: { message?: string }; status?: string; incomplete_details?: { reason?: string } };
   if (!response.ok) throw badRequest(data.error?.message || "Agent discovery failed.", response.status);
-  const parsed = JSON.parse(extractResponseText(data)) as { agents?: AgentCandidate[] };
+  if (data.status === "incomplete") {
+    throw badRequest(`Agent discovery stopped before returning candidates: ${data.incomplete_details?.reason || "incomplete response"}.`, 502);
+  }
+  const parsed = JSON.parse(extractJsonText(extractResponseText(data))) as { agents?: AgentCandidate[] };
   const rawAgents = parsed.agents || [];
   return candidatesFromRaw(rawAgents);
 }
