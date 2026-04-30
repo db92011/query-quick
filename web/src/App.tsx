@@ -29,7 +29,7 @@ type AgentRecord = {
   last_verified: string;
   confidence_score: number;
   seen_before?: boolean;
-  indexing?: boolean;
+  intel_pending?: boolean;
 };
 
 type Profile = {
@@ -182,25 +182,23 @@ const packetOrder: PacketKey[] = [
 ];
 
 const agentSearchActivity = [
-  "Opening QueryTracker records.",
-  "Checking live submission links.",
-  "Reading agency guidelines.",
-  "Scanning agent profile pages.",
+  "Opening public agent records.",
+  "Checking live submission paths.",
+  "Scanning agency profile pages.",
   "Matching your genre criteria.",
   "Matching your subgenre language.",
   "Checking Manuscript Wish List.",
   "Reviewing wishlist signals.",
-  "Finding required kit pieces.",
-  "Verifying QueryManager routes.",
-  "Testing online form links.",
-  "Checking public email guidance.",
+  "Checking QueryTracker routes.",
+  "Checking QueryManager routes.",
+  "Checking public email signals.",
   "Looking for agent interviews.",
   "Checking podcast guidance.",
   "Checking video guidance.",
   "Removing closed records.",
   "Removing stale records.",
-  "Building source-backed agent rows.",
-  "Preparing next actions.",
+  "Downloading source-backed agent rows.",
+  "Preparing Intel-ready results.",
 ];
 
 function countWords(value: string) {
@@ -572,6 +570,7 @@ function Workspace() {
   const [sentCount, setSentCount] = useState(() => Number(localStorage.getItem("query-quick.sent") || "0"));
   const [status, setStatus] = useState("Ready.");
   const [isSearching, setIsSearching] = useState(false);
+  const [intelLoadingKey, setIntelLoadingKey] = useState("");
   const [activityIndex, setActivityIndex] = useState(0);
   const [kitSaved, setKitSaved] = useState(() => localStorage.getItem("query-quick.kit-saved") === "true");
   const [intelAgent, setIntelAgent] = useState<AgentRecord | null>(null);
@@ -697,14 +696,19 @@ ${body}`;
   }
 
   function canOpenSubmissionRoute(agent: AgentRecord) {
-    return agent.query_method === "email" || (validHttpUrl(agent.submission_url) && agent.submission_route_verified !== false);
+    return (agent.query_method === "email" && Boolean(agent.public_email)) || (validHttpUrl(agent.submission_url) && agent.submission_route_verified !== false);
   }
 
   function agentReadyForSubmission(agent: AgentRecord) {
+    if (agent.intel_pending) return false;
     const hasMappedMaterials = Array.isArray(agent.required_materials) && agent.required_materials.length > 0;
     const summaryText = agent.requirements_summary?.toLowerCase() || "";
     const hasUsableSummary = Boolean(agent.requirements_summary && !summaryText.includes("indexing") && !summaryText.includes("building agent intel"));
     return hasMappedMaterials && hasUsableSummary && canOpenSubmissionRoute(agent);
+  }
+
+  function agentNeedsIntel(agent: AgentRecord) {
+    return agent.intel_pending || !agentReadyForSubmission(agent);
   }
 
   function submissionRouteLabel(agent: AgentRecord) {
@@ -855,7 +859,6 @@ ${profile.name || ""}`;
     }
     setIsSearching(true);
     setStatus("Finding currently open agents...");
-    let discoveredAgents: AgentRecord[] = [];
     try {
       const discovered = await api<{
         agents: AgentRecord[];
@@ -865,31 +868,46 @@ ${profile.name || ""}`;
         method: "POST",
         body: JSON.stringify(profile),
       }, session.token);
-      discoveredAgents = discovered.agents;
       setAgents(discovered.agents);
       if (!discovered.agents.length) {
         setStatus("Still checking live sources. Try again in a moment to pull in more agents.");
         return;
       }
-      setStatus(`${discovered.agents.length} live candidates found. Building Agent Intel...`);
+      setStatus(`${discovered.agents.length} agents downloaded. Click Intel on an agent to fill requirements.`);
+    } catch (error) {
+      setAgents([]);
+      setStatus("Still checking live sources. Try again in a moment to pull in more agents.");
+    } finally {
+      setIsSearching(false);
+    }
+  }
+
+  async function runAgentIntel(agent: AgentRecord) {
+    if (!session) return;
+    const key = `${agent.agent_name}-${agent.agency}`;
+    setIntelLoadingKey(key);
+    setStatus(`Building Agent Intel for ${agent.agent_name}...`);
+    try {
       const response = await api<{
         agents: AgentRecord[];
         cached?: boolean;
         diagnostics?: { raw_count: number; candidate_count: number; verified_count: number };
       }>("/api/agents/search", {
         method: "POST",
-        body: JSON.stringify({ ...profile, candidates: discovered.agents }),
+        body: JSON.stringify({ ...profile, candidates: [agent] }),
       }, session.token);
-      setAgents(response.agents.length ? response.agents : discovered.agents);
-      const readyCount = response.agents.filter(agentReadyForSubmission).length;
-      setStatus(response.agents.length
-        ? `${readyCount || response.agents.length} source-backed leads ready.`
-        : `${discovered.agents.length} live candidates ready. Click Find matching agents again to add more detail.`);
+      const enriched = response.agents[0] || agent;
+      setAgents((current) => current.map((item) => (
+        item.agent_name === agent.agent_name && item.agency === agent.agency ? enriched : item
+      )));
+      setIntelAgent(enriched);
+      setStatus(agentReadyForSubmission(enriched)
+        ? `Agent Intel ready for ${enriched.agent_name}.`
+        : `Agent Intel updated for ${enriched.agent_name}. Review sources before sending.`);
     } catch (error) {
-      if (!discoveredAgents.length) setAgents([]);
-      setStatus(discoveredAgents.length ? `${discoveredAgents.length} live candidates ready. Click Find matching agents again to add more detail.` : "Still checking live sources. Try again in a moment to pull in more agents.");
+      setStatus(error instanceof Error ? error.message : `Could not build Agent Intel for ${agent.agent_name}.`);
     } finally {
-      setIsSearching(false);
+      setIntelLoadingKey("");
     }
   }
 
@@ -1238,7 +1256,7 @@ ${profile.name || ""}`;
                           <span>Genre Match</span>
                           <span>Sub-Genre Match</span>
                           {agent.seen_before ? <span className="seen-before">Seen Before</span> : null}
-                          {agent.indexing && !agentReadyForSubmission(agent) ? <span className="indexing">Intel</span> : null}
+                          {agentNeedsIntel(agent) ? <span className="intel-pending">Intel</span> : null}
                         </div>
                         {agent.fit_reason ? <p className="fit-reason">{agent.fit_reason}</p> : null}
                         <p className="requirements-summary">{agent.requirements_summary}</p>
@@ -1261,7 +1279,14 @@ ${profile.name || ""}`;
                         </div>
                       </div>
                       <div className="agent-actions">
-                        <button className="secondary-button" type="button" onClick={() => setIntelAgent(agent)}>Intel</button>
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          disabled={intelLoadingKey === `${agent.agent_name}-${agent.agency}`}
+                          onClick={() => agentNeedsIntel(agent) ? runAgentIntel(agent) : setIntelAgent(agent)}
+                        >
+                          {intelLoadingKey === `${agent.agent_name}-${agent.agency}` ? "Intel..." : "Intel"}
+                        </button>
                         {agent.query_method === "email" && agent.public_email ? (
                           <button className="secondary-button" type="button" onClick={() => emailAgent(agent)}>Start Email</button>
                         ) : (

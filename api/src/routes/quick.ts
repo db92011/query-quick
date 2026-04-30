@@ -54,7 +54,7 @@ type AgentRecord = {
   last_verified: string;
   confidence_score: number;
   seen_before?: boolean;
-  indexing?: boolean;
+  intel_pending?: boolean;
 };
 
 type AgentCandidate = {
@@ -80,8 +80,6 @@ type AgentSearchDiagnostics = {
   raw_count: number;
   candidate_count: number;
   verified_count: number;
-  warm_count?: number;
-  indexed_count?: number;
   source?: string;
 };
 
@@ -123,6 +121,19 @@ function cacheKey(body: Record<string, unknown>) {
 
 function normalizedAgentKey(agent: AgentRecord) {
   return `${agent.agent_name}::${agent.agency}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function agentNeedsIntel(agent: Partial<AgentRecord>) {
+  const summary = clean(agent.requirements_summary).toLowerCase();
+  return (
+    !summary ||
+    summary.includes("building agent intel") ||
+    summary.includes("indexing") ||
+    !Array.isArray(agent.required_materials) ||
+    agent.required_materials.length <= 1 ||
+    !clean(agent.verification_notes) ||
+    !clean(agent.email_opener)
+  );
 }
 
 function validUrl(value: string | undefined) {
@@ -456,7 +467,7 @@ function candidateToAgent(candidate: AgentCandidate): AgentRecord {
     verification_notes: "Live candidate discovered; Query Quick is building Agent Intel.",
     last_verified: candidate.last_verified,
     confidence_score: candidate.confidence_score,
-    indexing: true,
+    intel_pending: true,
   });
 }
 
@@ -512,205 +523,13 @@ function sourceCandidateList(body: Record<string, unknown>) {
       const agent = candidate as Partial<AgentRecord>;
       const materials = Array.isArray(agent.required_materials) ? agent.required_materials : [];
       const summary = clean(agent.requirements_summary);
-      if (summary && !summary.toLowerCase().includes("building agent intel") && !summary.toLowerCase().includes("indexing") && materials.length) {
+      if (summary && !agentNeedsIntel(agent)) {
         return normalizeAgent(agent as AgentRecord);
       }
       return candidateToAgent(candidate as AgentCandidate);
     })
     .filter((agent) => agent.agent_name && agent.agency && validUrl(submissionRouteUrl(agent)))
     .slice(0, MAX_AGENT_POOL_RESULTS);
-}
-
-async function savedAgentCandidates(env: Env, body: Record<string, unknown>) {
-  const key = cacheKey(body);
-  const genre = clean(body.genre).toLowerCase();
-  const subgenreTerms = clean(body.subgenre)
-    .toLowerCase()
-    .split(/[\/,;]+/)
-    .map((term) => term.trim())
-    .filter(Boolean)
-    .slice(0, 4);
-  const rows = await all<{
-    agent_name: string;
-    agency: string;
-    genre_fit: string;
-    query_method: AgentRecord["query_method"];
-    submission_url: string;
-    public_email: string;
-    requirements_summary: string;
-    email_opener: string;
-    open_status: AgentRecord["open_status"];
-    source_url: string;
-    last_verified: string;
-    confidence_score: number;
-  }>(
-    env.DB,
-    `SELECT agent_name, agency, genre_fit, query_method, submission_url, public_email,
-            requirements_summary, email_opener, open_status, source_url, last_verified, confidence_score
-     FROM quick_agents
-     WHERE open_status != 'closed'
-       AND refresh_status = 'fresh'
-       AND (
-         EXISTS (
-           SELECT 1
-           FROM quick_agent_search_results qasr
-           JOIN quick_agent_searches qas ON qas.id = qasr.search_id
-           WHERE qasr.agent_id = quick_agents.id
-             AND qas.cache_key = ?7
-         ) OR
-         lower(genre_fit) LIKE ?1 OR
-         lower(requirements_summary) LIKE ?1 OR
-         lower(genre_fit) LIKE ?2 OR
-         lower(requirements_summary) LIKE ?2 OR
-         lower(genre_fit) LIKE ?3 OR
-         lower(requirements_summary) LIKE ?3 OR
-         lower(genre_fit) LIKE ?4 OR
-         lower(requirements_summary) LIKE ?4 OR
-         lower(genre_fit) LIKE ?5 OR
-         lower(requirements_summary) LIKE ?5
-       )
-     ORDER BY datetime(last_seen_at) DESC
-     LIMIT ?6`,
-    [
-      `%${genre}%`,
-      `%${subgenreTerms[0] || genre}%`,
-      `%${subgenreTerms[1] || genre}%`,
-      `%${subgenreTerms[2] || genre}%`,
-      `%${subgenreTerms[3] || genre}%`,
-      MAX_AGENT_POOL_RESULTS,
-      key,
-    ]
-  );
-  return rows.map((row) => normalizeAgent({
-    agent_name: row.agent_name,
-    agency: row.agency,
-    genre_fit: row.genre_fit,
-    matched_genre: row.genre_fit,
-    matched_subgenre: clean(body.subgenre) || row.genre_fit,
-    genre_evidence: "Matched from Query Quick's saved agent index.",
-    subgenre_evidence: "Matched from Query Quick's saved agent index.",
-    fit_reason: "Previously discovered and now rechecked against the live submission route.",
-    email_opener: row.email_opener || "",
-    query_method: row.query_method,
-    submission_url: row.submission_url,
-    public_email: row.public_email,
-    requirements_summary: row.requirements_summary || "Building Agent Intel...",
-    required_materials: ["query_letter"],
-    open_status: row.open_status,
-    source_url: row.source_url,
-    source_urls: [row.source_url],
-    verification_notes: "Warm-started from Query Quick's saved index and reverified live.",
-    last_verified: row.last_verified,
-    confidence_score: row.confidence_score,
-    indexing: true,
-  }));
-}
-
-async function indexedAgentResults(env: Env, body: Record<string, unknown>, limit = MAX_AGENT_POOL_RESULTS) {
-  const key = cacheKey(body);
-  const genre = clean(body.genre).toLowerCase();
-  const subgenreTerms = clean(body.subgenre)
-    .toLowerCase()
-    .split(/[\/,;]+/)
-    .map((term) => term.trim())
-    .filter(Boolean)
-    .slice(0, 4);
-  const rows = await all<{
-    agent_name: string;
-    agency: string;
-    genre_fit: string;
-    matched_genre: string;
-    matched_subgenre: string;
-    genre_evidence: string;
-    subgenre_evidence: string;
-    fit_reason: string;
-    query_method: AgentRecord["query_method"];
-    submission_url: string;
-    public_email: string;
-    requirements_summary: string;
-    email_opener: string;
-    open_status: AgentRecord["open_status"];
-    source_url: string;
-    source_urls_json: string;
-    verification_notes: string;
-    required_materials_json: string;
-    submission_route_verified: number;
-    submission_route_verified_at: string;
-    submission_route_status: number;
-    submission_route_notes: string;
-    last_verified: string;
-    confidence_score: number;
-  }>(
-    env.DB,
-    `SELECT agent_name, agency, genre_fit, matched_genre, matched_subgenre, genre_evidence, subgenre_evidence,
-            fit_reason, query_method, submission_url, public_email, requirements_summary, email_opener,
-            open_status, source_url, source_urls_json, verification_notes, required_materials_json,
-            submission_route_verified, submission_route_verified_at, submission_route_status, submission_route_notes,
-            last_verified, confidence_score
-     FROM quick_agents
-     WHERE open_status != 'closed'
-       AND refresh_status != 'candidate'
-       AND (
-         EXISTS (
-           SELECT 1
-           FROM quick_agent_search_results qasr
-           JOIN quick_agent_searches qas ON qas.id = qasr.search_id
-           WHERE qasr.agent_id = quick_agents.id
-             AND qas.cache_key = ?7
-         ) OR
-         lower(genre_fit) LIKE ?1 OR lower(matched_genre) LIKE ?1 OR lower(matched_subgenre) LIKE ?1 OR lower(requirements_summary) LIKE ?1 OR
-         lower(genre_fit) LIKE ?2 OR lower(matched_genre) LIKE ?2 OR lower(matched_subgenre) LIKE ?2 OR lower(requirements_summary) LIKE ?2 OR
-         lower(genre_fit) LIKE ?3 OR lower(matched_genre) LIKE ?3 OR lower(matched_subgenre) LIKE ?3 OR lower(requirements_summary) LIKE ?3 OR
-         lower(genre_fit) LIKE ?4 OR lower(matched_genre) LIKE ?4 OR lower(matched_subgenre) LIKE ?4 OR lower(requirements_summary) LIKE ?4 OR
-         lower(genre_fit) LIKE ?5 OR lower(matched_genre) LIKE ?5 OR lower(matched_subgenre) LIKE ?5 OR lower(requirements_summary) LIKE ?5
-       )
-     ORDER BY
-       CASE WHEN EXISTS (
-         SELECT 1
-         FROM quick_agent_search_results qasr
-         JOIN quick_agent_searches qas ON qas.id = qasr.search_id
-         WHERE qasr.agent_id = quick_agents.id
-           AND qas.cache_key = ?7
-       ) THEN 0 ELSE 1 END,
-       CASE WHEN open_status = 'open' THEN 0 ELSE 1 END,
-       datetime(last_verified) DESC
-     LIMIT ?6`,
-    [
-      `%${genre}%`,
-      `%${subgenreTerms[0] || genre}%`,
-      `%${subgenreTerms[1] || genre}%`,
-      `%${subgenreTerms[2] || genre}%`,
-      `%${subgenreTerms[3] || genre}%`,
-      limit,
-      key,
-    ]
-  );
-  return rows.map((row) => normalizeAgent({
-    agent_name: row.agent_name,
-    agency: row.agency,
-    genre_fit: row.genre_fit,
-    matched_genre: row.matched_genre || row.genre_fit,
-    matched_subgenre: row.matched_subgenre || clean(body.subgenre),
-    genre_evidence: row.genre_evidence || "Matched from Query Quick's indexed agent database.",
-    subgenre_evidence: row.subgenre_evidence || "Matched from Query Quick's indexed agent database.",
-    fit_reason: row.fit_reason || "Indexed match for this profile.",
-    email_opener: row.email_opener || "",
-    query_method: row.query_method,
-    submission_url: row.submission_url,
-    public_email: row.public_email,
-    requirements_summary: row.requirements_summary,
-    required_materials: safeJsonArray(row.required_materials_json, ["query_letter"]) as AgentRecord["required_materials"],
-    open_status: row.open_status,
-    source_url: row.source_url,
-    source_urls: safeJsonArray(row.source_urls_json, [row.source_url]),
-    verification_notes: row.verification_notes,
-    submission_route_verified: Boolean(row.submission_route_verified),
-    submission_route_verified_at: row.submission_route_verified_at,
-    submission_route_status: row.submission_route_status,
-    submission_route_notes: row.submission_route_notes,
-    last_verified: row.last_verified,
-    confidence_score: row.confidence_score,
-  }));
 }
 
 async function candidatesFromRaw(rawAgents: AgentCandidate[]) {
@@ -1221,9 +1040,9 @@ async function saveAgentResearch(
         agent.submission_route_verified_at || "",
         Number(agent.submission_route_status || 0),
         agent.submission_route_notes || "",
-        agent.indexing ? "candidate" : "fresh",
+        agentNeedsIntel(agent) ? "candidate" : "fresh",
         "",
-        new Date(Date.now() + 1000 * 60 * (agent.indexing ? 30 : 60 * 6)).toISOString(),
+        new Date(Date.now() + 1000 * 60 * (agentNeedsIntel(agent) ? 30 : 60 * 6)).toISOString(),
       ]
     );
     await run(
@@ -1235,13 +1054,7 @@ async function saveAgentResearch(
   }
 }
 
-function freshEnough(agent: AgentRecord, hours = 6) {
-  const verifiedAt = Date.parse(agent.submission_route_verified_at || agent.last_verified || "");
-  if (Number.isNaN(verifiedAt)) return false;
-  return Date.now() - verifiedAt < hours * 60 * 60 * 1000;
-}
-
-function rowToIndexedAgent(row: {
+function rowToIntelAgent(row: {
   agent_name: string;
   agency: string;
   genre_fit: string;
@@ -1273,9 +1086,9 @@ function rowToIndexedAgent(row: {
     genre_fit: row.genre_fit,
     matched_genre: row.matched_genre || row.genre_fit,
     matched_subgenre: row.matched_subgenre || row.genre_fit,
-    genre_evidence: row.genre_evidence || "Matched from Query Quick's indexed agent database.",
-    subgenre_evidence: row.subgenre_evidence || "Matched from Query Quick's indexed agent database.",
-    fit_reason: row.fit_reason || "Indexed match for this profile.",
+    genre_evidence: row.genre_evidence || "Matched from Query Quick's stored agent database.",
+    subgenre_evidence: row.subgenre_evidence || "Matched from Query Quick's stored agent database.",
+    fit_reason: row.fit_reason || "Stored match for this profile.",
     email_opener: row.email_opener || "",
     query_method: row.query_method,
     submission_url: row.submission_url,
@@ -1295,7 +1108,7 @@ function rowToIndexedAgent(row: {
   });
 }
 
-export async function handleAgentIndexRefresh(env: Env) {
+export async function handleAgentIntelRefresh(env: Env) {
   const rows = await all<{
     id: string;
     normalized_key: string;
@@ -1340,7 +1153,7 @@ export async function handleAgentIndexRefresh(env: Env) {
 
   const now = new Date().toISOString();
   for (const row of rows) {
-    const agent = rowToIndexedAgent(row);
+    const agent = rowToIntelAgent(row);
     const result = await verifySubmissionRouteResult(agent);
     const nextRefreshAt = new Date(Date.now() + (result.agent ? 6 : 1) * 60 * 60 * 1000).toISOString();
     await run(
@@ -1397,7 +1210,9 @@ export async function handleAgentSearch(request: Request, env: Env) {
 
   const key = cacheKey(body);
   const seenKeys = await userSeenAgentKeys(env, session.user.id);
-  const generated = await generateAgents(env, body);
+  const sourceCandidates = sourceCandidateList(body);
+  if (!sourceCandidates.length) return badRequest("At least one downloaded agent candidate is required for Agent Intel.", 400);
+  const generated = await generateAgents(env, { ...body, candidates: sourceCandidates.slice(0, ENRICHMENT_BATCH_SIZE) });
   const agents = markSeenBefore(dedupeAgents(generated.agents), seenKeys);
   if (!agents.length) {
     await saveAgentResearch(env, session.user.id, key, body, agents);
@@ -1423,69 +1238,18 @@ export async function handleAgentDiscover(request: Request, env: Env) {
 
   const key = cacheKey(body);
   const seenKeys = await userSeenAgentKeys(env, session.user.id);
-  const indexedCandidates = dedupeAgents(await indexedAgentResults(env, body, MAX_AGENT_POOL_RESULTS));
-  const freshIndexed = indexedCandidates.filter((agent) => agent.submission_route_verified && freshEnough(agent));
-  if (freshIndexed.length >= 10) {
-    const agents = markSeenBefore(freshIndexed, seenKeys).map((agent) => ({
-      ...agent,
-      indexing: false,
-    }));
-    await saveAgentResearch(env, session.user.id, key, body, agents);
-    return json({
-      ok: true,
-      cached: false,
-      agents,
-      diagnostics: {
-        raw_count: indexedCandidates.length,
-        candidate_count: indexedCandidates.length,
-        verified_count: agents.length,
-        indexed_count: indexedCandidates.length,
-        source: "agent_index",
-      },
-    });
-  }
-
-  const warmCandidates = dedupeAgents(await savedAgentCandidates(env, body));
-  const warmVerified = await verifySubmissionRoutes(warmCandidates);
-  const indexedVerified = indexedCandidates.length && freshIndexed.length < 10
-    ? await verifySubmissionRoutes(indexedCandidates.filter((agent) => !freshEnough(agent)).slice(0, 100))
-    : [];
-  let discovered: { agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics };
-  try {
-    const liveDiscovered = await generateLiveCandidatePool(env, {
-      ...body,
-      exclude_agents: [...freshIndexed, ...indexedVerified, ...warmVerified].map((agent) => `${agent.agent_name} — ${agent.agency}`),
-    });
-    const agents = dedupeAgents([...freshIndexed, ...indexedVerified, ...warmVerified, ...liveDiscovered.agents]);
-    discovered = {
-      agents,
-      diagnostics: {
-        ...liveDiscovered.diagnostics,
-        verified_count: agents.length,
-        warm_count: warmVerified.length,
-        indexed_count: indexedCandidates.length,
-        source: indexedCandidates.length || warmVerified.length ? "agent_index_plus_live" : "live",
-      },
-    };
-  } catch (error) {
-    const fallbackAgents = dedupeAgents([...freshIndexed, ...indexedVerified, ...warmVerified]);
-    if (!fallbackAgents.length) throw error;
-    discovered = {
-      agents: fallbackAgents,
-      diagnostics: {
-        raw_count: indexedCandidates.length + warmCandidates.length,
-        candidate_count: fallbackAgents.length,
-        verified_count: fallbackAgents.length,
-        warm_count: warmVerified.length,
-        indexed_count: indexedCandidates.length,
-        source: "agent_index_fallback",
-      },
-    };
-  }
+  const liveDiscovered = await generateLiveCandidatePool(env, body);
+  const discovered: { agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics } = {
+    agents: liveDiscovered.agents,
+    diagnostics: {
+      ...liveDiscovered.diagnostics,
+      source: "live_full_pool",
+    },
+  };
   const agents = markSeenBefore(dedupeAgents(discovered.agents), seenKeys).map((agent) => ({
     ...agent,
-    indexing: true,
-    seen_before: agent.seen_before && !agent.indexing,
+    intel_pending: true,
+    seen_before: agent.seen_before,
   }));
   await saveAgentResearch(env, session.user.id, key, body, agents);
   return json({ ok: true, cached: false, agents, diagnostics: discovered.diagnostics });

@@ -1,7 +1,7 @@
 import { badRequest, json, textResponse } from "./lib/db";
 import { handleBilling } from "./routes/billing";
 import { handleQuickAuth } from "./routes/quick-auth";
-import { handleAgentDiscover, handleAgentIndexRefresh, handleAgentSearch, handleMarkSent, handleQuickFileUpload, handleQuickProfile, handleWaitlist } from "./routes/quick";
+import { handleAgentDiscover, handleAgentIntelRefresh, handleAgentSearch, handleMarkSent, handleQuickFileUpload, handleQuickProfile, handleWaitlist } from "./routes/quick";
 
 type Env = {
   DB: D1Database;
@@ -65,6 +65,6 @@ export default {
     }
   },
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(handleAgentIndexRefresh(env));
+    ctx.waitUntil(handleAgentIntelRefresh(env));
   },
 };
