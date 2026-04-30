@@ -558,7 +558,7 @@ a.secondary-button {
   max-width: 1240px;
   height: 100vh;
   margin: 0 auto;
-  padding: 56px clamp(24px, 3vw, 36px) 72px;
+  padding: 56px clamp(24px, 3vw, 36px) 18px;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
@@ -820,7 +820,7 @@ a.secondary-button {
 
 .packet-bar {
   position: sticky;
-  bottom: 18px;
+  bottom: 0;
   z-index: 10;
   margin-top: 24px;
   display: flex;
@@ -1690,7 +1690,7 @@ a.secondary-button {
     max-width: 720px;
     height: auto;
     overflow: visible;
-    padding: 32px 16px 72px;
+    padding: 32px 16px 24px;
   }
 
   .main-header {
@@ -1744,7 +1744,7 @@ a.secondary-button {
   .packet-bar {
     left: 16px;
     right: 16px;
-    bottom: 12px;
+    bottom: 8px;
     flex-wrap: wrap;
     justify-content: stretch;
   }
