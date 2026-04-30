@@ -1024,25 +1024,44 @@ a.secondary-button {
   margin-top: 18px;
 }
 
-.match-pills span {
+.match-pills span,
+.match-pills button {
   display: inline-flex;
   align-items: center;
   min-height: 30px;
   padding: 6px 12px;
   border-radius: 999px;
+  border: 0;
   background: #12b76a;
   color: #ffffff;
   box-shadow: 0 0 0 1px rgba(18, 183, 106, 0.18), 0 8px 18px rgba(18, 183, 106, 0.14);
+  font-family: inherit;
   font-size: 12px;
   font-weight: 700;
+}
+
+.match-pills button {
+  cursor: pointer;
+}
+
+.match-pills button:disabled {
+  cursor: wait;
+  opacity: 0.82;
 }
 
 .match-pills .seen-before {
   background: #123d2d;
 }
 
-.match-pills .intel-pending {
-  background: #8a5b2f;
+.match-pills .intel-pending,
+.match-pills .intel-running {
+  background: #1d4ed8;
+  box-shadow: 0 0 0 1px rgba(29, 78, 216, 0.22), 0 8px 18px rgba(29, 78, 216, 0.16);
+}
+
+.match-pills .intel-ready {
+  background: #047857;
+  box-shadow: 0 0 0 1px rgba(4, 120, 87, 0.22), 0 8px 18px rgba(4, 120, 87, 0.16);
 }
 
 .fit-reason {
@@ -1244,6 +1263,27 @@ a.secondary-button {
 .agent-actions .secondary-button {
   min-height: 40px;
   padding: 10px 14px;
+}
+
+.agent-actions .intel-button {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+  color: #ffffff;
+}
+
+.agent-actions .intel-button:hover:not(:disabled) {
+  background: #1e40af;
+  border-color: #1e40af;
+}
+
+.agent-actions .intel-ready {
+  background: #047857;
+  border-color: #047857;
+}
+
+.agent-actions .intel-ready:hover:not(:disabled) {
+  background: #065f46;
+  border-color: #065f46;
 }
 
 .queried-list {

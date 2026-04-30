@@ -80,6 +80,8 @@ type AgentSearchDiagnostics = {
   raw_count: number;
   candidate_count: number;
   verified_count: number;
+  soft_verified_count?: number;
+  discovery_passes?: number;
   source?: string;
 };
 
@@ -92,6 +94,8 @@ type RouteVerificationResult = {
 
 const MAX_AGENT_POOL_RESULTS = 750;
 const ENRICHMENT_BATCH_SIZE = 12;
+const DISCOVERY_PASS_TARGET = 300;
+const MAX_DISCOVERY_PASSES = 8;
 
 const allowedFileKinds = new Set([
   "query_letter",
@@ -317,6 +321,21 @@ async function verifySubmissionRoutes(agents: AgentRecord[]) {
   return verified.filter((agent): agent is AgentRecord => Boolean(agent));
 }
 
+async function softVerifySubmissionRoutes(agents: AgentRecord[]) {
+  return agents.map((agent) => {
+    if (agent.submission_route_verified) return agent;
+    return normalizeAgent({
+      ...agent,
+      submission_route_verified: false,
+      submission_route_verified_at: new Date().toISOString(),
+      submission_route_status: 0,
+      submission_route_notes: "Stage-one download kept this source-backed route. Agent Intel must confirm the exact requirements before sending.",
+      verification_notes: clean(agent.verification_notes) || "Stage-one discovery kept this source-backed agent for Agent Intel review.",
+      intel_pending: true,
+    });
+  });
+}
+
 function dedupeAgents(agents: AgentRecord[]) {
   const seen = new Set<string>();
   const deduped: AgentRecord[] = [];
@@ -465,6 +484,8 @@ function candidateToAgent(candidate: AgentCandidate): AgentRecord {
     source_url: candidate.source_url,
     source_urls: candidate.source_urls || [candidate.source_url],
     verification_notes: "Live candidate discovered; Query Quick is building Agent Intel.",
+    submission_route_verified: false,
+    submission_route_notes: "Stage-one download kept this source-backed route. Agent Intel must confirm the exact requirements before sending.",
     last_verified: candidate.last_verified,
     confidence_score: candidate.confidence_score,
     intel_pending: true,
@@ -473,8 +494,9 @@ function candidateToAgent(candidate: AgentCandidate): AgentRecord {
 
 function candidateDiscoveryPrompt(body: Record<string, unknown>) {
   const alreadySeen = Array.isArray(body.exclude_agents)
-    ? (body.exclude_agents as unknown[]).map(clean).filter(Boolean).slice(0, 80)
+    ? (body.exclude_agents as unknown[]).map(clean).filter(Boolean).slice(0, 450)
     : [];
+  const discoveryFocus = clean(body.discovery_focus);
   const exclusionText = alreadySeen.length
     ? `\nAvoid returning these already-seen agents unless there are no alternatives:\n${alreadySeen.map((agent) => `- ${agent}`).join("\n")}\nKeep searching deeper for different agents beyond this list.`
     : "";
@@ -483,9 +505,11 @@ function candidateDiscoveryPrompt(body: Record<string, unknown>) {
 Genre: ${clean(body.genre)}
 Subgenre: ${clean(body.subgenre)}
 Category: ${clean(body.category)}
+Discovery focus: ${discoveryFocus || "broad genre/subgenre pool"}
 
-Return the full relevant candidate pool you can verify, not just a small page of results. If there are hundreds of plausible agents in this genre/subgenre lane, keep building the list. This is stage one only: discovery and live submission route candidates.
-Only include an agent when you can identify the agent name, agency, genre/subgenre fit, and a specific submission route or public query email.
+Return as many unique agents as you can for this specific focus, aiming for 40-75 useful records in this pass when the public sources support it. Do not stop after a handful of obvious names.
+This is stage one only: discovery and live submission route candidates. Agent Intel will fill missing requirements later.
+Include an agent when you can identify the agent name, agency, genre/subgenre fit, and either a specific submission route, public query email, or a reliable public source/profile page that can lead Agent Intel to the route.
 Do not include closed agents. Do not include QueryTracker/QueryManager pages that say not open, temporarily closed, or not accepting queries.
 Use current public web sources. Prefer QueryTracker, QueryManager, agency submission pages, Manuscript Wish List, and agency profile pages.
 Search beyond the obvious top results and keep going through directories/profile pages so we can build depth over time.
@@ -535,19 +559,20 @@ function sourceCandidateList(body: Record<string, unknown>) {
 async function candidatesFromRaw(rawAgents: AgentCandidate[]) {
   const candidates = rawAgents.map(candidateToAgent);
   const filtered = candidates.filter((agent) => {
-    if (!agent.agent_name || !agent.agency || !agent.matched_genre || !agent.matched_subgenre) return false;
+    if (!agent.agent_name || !agent.agency) return false;
     if (!["open", "selective"].includes(agent.open_status)) return false;
-    if (Number(agent.confidence_score || 0) < 70) return false;
+    if (Number(agent.confidence_score || 0) < 45) return false;
     if (agent.query_method === "email") return /\S+@\S+\.\S+/.test(agent.public_email || "");
-    return validUrl(agent.submission_url);
+    return validUrl(agent.submission_url) || validUrl(agent.source_url);
   });
-  const verified = await verifySubmissionRoutes(dedupeAgents(filtered));
+  const verified = await softVerifySubmissionRoutes(dedupeAgents(filtered));
   return {
     agents: verified,
     diagnostics: {
       raw_count: rawAgents.length,
       candidate_count: filtered.length,
       verified_count: verified.length,
+      soft_verified_count: verified.filter((agent) => agent.submission_route_verified === false).length,
     },
   };
 }
@@ -621,10 +646,11 @@ async function generateAgentCandidates(env: Env, body: Record<string, unknown>) 
         input: [
           {
             role: "system",
-            content: "You discover currently open literary agent submission routes. Return JSON only. Do not include closed agents or unverifiable routes.",
+            content: "You discover currently open literary agent candidates and source-backed submission routes. Return JSON only. Do not include closed agents.",
           },
           { role: "user", content: prompt },
         ],
+        max_output_tokens: 16000,
         text: {
           format: {
             type: "json_schema",
@@ -654,7 +680,7 @@ async function generateGeminiCandidates(env: Env, body: Record<string, unknown>)
     body: JSON.stringify({
       contents: [{ parts: [{ text: candidateDiscoveryPrompt(body) }] }],
       tools: [{ google_search: {} }],
-      generationConfig: { temperature: 0.2 },
+      generationConfig: { temperature: 0.2, maxOutputTokens: 12000 },
     }),
   });
   const data = await response.json() as {
@@ -681,7 +707,7 @@ async function generateClaudeCandidates(env: Env, body: Record<string, unknown>)
     },
     body: JSON.stringify({
       model: clean(env.ANTHROPIC_MODEL) || "claude-sonnet-4-5",
-      max_tokens: 5000,
+      max_tokens: 12000,
       temperature: 0.2,
       tools: [{ type: "web_search_20250305", name: "web_search" }],
       messages: [{ role: "user", content: candidateDiscoveryPrompt(body) }],
@@ -697,7 +723,23 @@ async function generateClaudeCandidates(env: Env, body: Record<string, unknown>)
   return candidatesFromRaw(parsed.agents || []);
 }
 
-async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>) {
+function discoveryFocuses(body: Record<string, unknown>) {
+  const genre = clean(body.genre) || "this genre";
+  const subgenre = clean(body.subgenre) || "this subgenre";
+  const category = clean(body.category) || "this category";
+  return [
+    `broad current ${category} ${genre} literary agents accepting ${subgenre}`,
+    `QueryTracker agents open to ${genre} and ${subgenre}`,
+    `QueryManager submission forms for literary agents accepting ${genre} and ${subgenre}`,
+    `Manuscript Wish List agents seeking ${genre} ${subgenre}`,
+    `agency submission pages naming agents open to ${genre} ${subgenre}`,
+    `newer and associate literary agents building lists in ${genre} ${subgenre}`,
+    `independent agencies and boutique agencies accepting ${genre} ${subgenre}`,
+    `deep directory pass for additional open ${genre} ${subgenre} agents not already found`,
+  ].slice(0, MAX_DISCOVERY_PASSES);
+}
+
+async function generateDiscoveryPass(env: Env, body: Record<string, unknown>) {
   const providers: Array<Promise<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>> = [];
   if (env.OPENAI_API_KEY) providers.push(generateAgentCandidates(env, body));
   if (env.GEMINI_API_KEY) providers.push(generateGeminiCandidates(env, body));
@@ -711,13 +753,39 @@ async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>
     const firstError = results.find((result): result is PromiseRejectedResult => result.status === "rejected")?.reason;
     throw firstError instanceof Response ? firstError : badRequest(firstError instanceof Error ? firstError.message : "All discovery providers failed.", 502);
   }
-  const agents = dedupeAgents(fulfilled.flatMap((result) => result.value.agents));
+  return fulfilled;
+}
+
+async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>) {
+  const fulfilled: Array<PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>> = [];
+  const agents: AgentRecord[] = [];
+  const focuses = discoveryFocuses(body);
+
+  for (const focus of focuses) {
+    const excludeAgents = Array.from(new Set([
+      ...(Array.isArray(body.exclude_agents) ? (body.exclude_agents as unknown[]).map(clean).filter(Boolean) : []),
+      ...agents.map((agent) => `${agent.agent_name} — ${agent.agency}`),
+    ])).slice(0, 450);
+    let passResults: Array<PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>>;
+    try {
+      passResults = await generateDiscoveryPass(env, { ...body, discovery_focus: focus, exclude_agents: excludeAgents });
+    } catch (error) {
+      if (!fulfilled.length) throw error;
+      continue;
+    }
+    fulfilled.push(...passResults);
+    agents.splice(0, agents.length, ...dedupeAgents([...agents, ...passResults.flatMap((result) => result.value.agents)]).slice(0, MAX_AGENT_POOL_RESULTS));
+    if (agents.length >= DISCOVERY_PASS_TARGET) break;
+  }
+
   return {
     agents,
     diagnostics: {
       raw_count: fulfilled.reduce((sum, result) => sum + result.value.diagnostics.raw_count, 0),
       candidate_count: fulfilled.reduce((sum, result) => sum + result.value.diagnostics.candidate_count, 0),
       verified_count: agents.length,
+      soft_verified_count: fulfilled.reduce((sum, result) => sum + (result.value.diagnostics.soft_verified_count || 0), 0),
+      discovery_passes: fulfilled.length,
       source: "provider_pool",
     },
   };

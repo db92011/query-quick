@@ -869,7 +869,7 @@ ${profile.name || ""}`;
       const discovered = await api<{
         agents: AgentRecord[];
         cached?: boolean;
-        diagnostics?: { raw_count: number; candidate_count: number; verified_count: number };
+        diagnostics?: { raw_count: number; candidate_count: number; verified_count: number; discovery_passes?: number };
       }>("/api/agents/discover", {
         method: "POST",
         body: JSON.stringify(profile),
@@ -879,7 +879,8 @@ ${profile.name || ""}`;
         setStatus("Still checking live sources. Try again in a moment to pull in more agents.");
         return;
       }
-      setStatus(`${discovered.agents.length} agents downloaded. Click Intel on an agent to fill requirements.`);
+      const passCount = discovered.diagnostics?.discovery_passes ? ` across ${discovered.diagnostics.discovery_passes} discovery passes` : "";
+      setStatus(`${discovered.agents.length} agents downloaded${passCount}. Click Run Intel to fill requirements.`);
     } catch (error) {
       setAgents([]);
       setStatus("Still checking live sources. Try again in a moment to pull in more agents.");
@@ -1259,6 +1260,9 @@ ${profile.name || ""}`;
                   {sortedAgents.map((agent) => {
                     const isIntelLoading = intelLoadingKeys.includes(agentKey(agent));
                     const intelLimitReached = intelLoadingKeys.length >= maxConcurrentIntel && !isIntelLoading;
+                    const needsIntel = agentNeedsIntel(agent);
+                    const intelBlocked = needsIntel && intelLimitReached;
+                    const intelState = isIntelLoading ? "running" : needsIntel ? "pending" : "ready";
                     return (
                     <article className="agent-row" key={agentKey(agent)}>
                       <div className="agent-main">
@@ -1273,7 +1277,14 @@ ${profile.name || ""}`;
                           <span>Genre Match</span>
                           <span>Sub-Genre Match</span>
                           {agent.seen_before ? <span className="seen-before">Seen Before</span> : null}
-                          {agentNeedsIntel(agent) ? <span className="intel-pending">Intel</span> : null}
+                          <button
+                            className={`intel-pill intel-${intelState}`}
+                            type="button"
+                            disabled={isIntelLoading || intelBlocked}
+                            onClick={() => needsIntel ? runAgentIntel(agent) : setIntelAgent(agent)}
+                          >
+                            {isIntelLoading ? "Intel running" : needsIntel ? "Run Intel" : "Intel Ready"}
+                          </button>
                         </div>
                         {agent.fit_reason ? <p className="fit-reason">{agent.fit_reason}</p> : null}
                         <p className="requirements-summary">{agent.requirements_summary}</p>
@@ -1297,12 +1308,12 @@ ${profile.name || ""}`;
                       </div>
                       <div className="agent-actions">
                         <button
-                          className="secondary-button"
+                          className={`secondary-button intel-button intel-${intelState}`}
                           type="button"
-                          disabled={isIntelLoading || intelLimitReached}
-                          onClick={() => agentNeedsIntel(agent) ? runAgentIntel(agent) : setIntelAgent(agent)}
+                          disabled={isIntelLoading || intelBlocked}
+                          onClick={() => needsIntel ? runAgentIntel(agent) : setIntelAgent(agent)}
                         >
-                          {isIntelLoading ? "Intel..." : intelLimitReached ? "Two running" : "Intel"}
+                          {isIntelLoading ? "Intel..." : intelLimitReached ? "Two running" : needsIntel ? "Run Intel" : "View Intel"}
                         </button>
                         {agent.query_method === "email" && agent.public_email ? (
                           <button className="secondary-button" type="button" onClick={() => emailAgent(agent)}>Start Email</button>
