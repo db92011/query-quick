@@ -203,6 +203,32 @@ const agentSearchActivity = [
   "Preparing Intel-ready results.",
 ];
 
+function discoveryFocuses(profile: Profile) {
+  const genre = profile.genre.trim() || "this genre";
+  const subgenre = profile.subgenre.trim() || "this subgenre";
+  const category = profile.category.trim() || "this category";
+  return [
+    `broad current ${category} ${genre} literary agents accepting ${subgenre}`,
+    `QueryTracker agents open to ${genre} and ${subgenre}`,
+    `QueryManager submission forms for literary agents accepting ${genre} and ${subgenre}`,
+    `Manuscript Wish List agents seeking ${genre} ${subgenre}`,
+    `agency submission pages naming agents open to ${genre} ${subgenre}`,
+    `newer and associate literary agents building lists in ${genre} ${subgenre}`,
+    `independent agencies and boutique agencies accepting ${genre} ${subgenre}`,
+    `deep directory pass for additional open ${genre} ${subgenre} agents not already found`,
+  ];
+}
+
+function mergeAgentPools(current: AgentRecord[], incoming: AgentRecord[]) {
+  const seen = new Set<string>();
+  return [...current, ...incoming].filter((agent) => {
+    const key = `${agent.agent_name}::${agent.agency}`.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function countWords(value: string) {
   return value.trim().split(/\s+/).filter(Boolean).length;
 }
@@ -897,26 +923,40 @@ ${profile.name || ""}`;
       return;
     }
     setIsSearching(true);
-    setStatus("Finding currently open agents...");
+    setAgents([]);
+    setStatus("Starting live agent download...");
+    const focuses = discoveryFocuses(profile);
+    let downloaded: AgentRecord[] = [];
+    let successfulPasses = 0;
     try {
-      const discovered = await api<{
-        agents: AgentRecord[];
-        cached?: boolean;
-        diagnostics?: { raw_count: number; candidate_count: number; verified_count: number; discovery_passes?: number };
-      }>("/api/agents/discover", {
-        method: "POST",
-        body: JSON.stringify(profile),
-      }, session.token);
-      setAgents(discovered.agents);
-      if (!discovered.agents.length) {
-        setStatus("Still checking live sources. Try again in a moment to pull in more agents.");
-        return;
+      for (const [index, discovery_focus] of focuses.entries()) {
+        setStatus(`Searching source lane ${index + 1}/${focuses.length}. ${downloaded.length} agents downloaded so far.`);
+        try {
+          const discovered = await api<{
+            agents: AgentRecord[];
+            cached?: boolean;
+            diagnostics?: { raw_count: number; candidate_count: number; verified_count: number; discovery_passes?: number };
+          }>("/api/agents/discover", {
+            method: "POST",
+            body: JSON.stringify({
+              ...profile,
+              discovery_focus,
+              exclude_agents: downloaded.map((agent) => `${agent.agent_name} — ${agent.agency}`),
+            }),
+          }, session.token);
+          successfulPasses += 1;
+          downloaded = mergeAgentPools(downloaded, discovered.agents);
+          setAgents(downloaded);
+          setStatus(`${downloaded.length} agents downloaded live across ${successfulPasses} source lanes. Still searching...`);
+        } catch {
+          setStatus(`${downloaded.length} agents downloaded. One source lane stalled, moving to the next.`);
+        }
       }
-      const passCount = discovered.diagnostics?.discovery_passes ? ` across ${discovered.diagnostics.discovery_passes} discovery passes` : "";
-      setStatus(`${discovered.agents.length} agents downloaded${passCount}. Click Run Intel to fill requirements.`);
+      setStatus(downloaded.length
+        ? `${downloaded.length} agents downloaded. Click Run Intel to fill requirements.`
+        : "No agents came back from the live source lanes. Try again in a moment.");
     } catch (error) {
-      setAgents([]);
-      setStatus("Still checking live sources. Try again in a moment to pull in more agents.");
+      setStatus(error instanceof Error ? error.message : "Still checking live sources. Try again in a moment to pull in more agents.");
     } finally {
       setIsSearching(false);
     }

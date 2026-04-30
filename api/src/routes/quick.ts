@@ -94,8 +94,8 @@ type RouteVerificationResult = {
 
 const MAX_AGENT_POOL_RESULTS = 750;
 const ENRICHMENT_BATCH_SIZE = 12;
-const DISCOVERY_PASS_TARGET = 300;
-const MAX_DISCOVERY_PASSES = 8;
+const MAX_DISCOVERY_PASSES = 4;
+const DISCOVERY_PROVIDER_TIMEOUT_MS = 65000;
 
 const allowedFileKinds = new Set([
   "query_letter",
@@ -351,14 +351,12 @@ function dedupeAgents(agents: AgentRecord[]) {
 async function userSeenAgentKeys(env: Env, userId: string) {
   const rows = await all<{ normalized_key: string }>(
     env.DB,
-    `SELECT DISTINCT qa.normalized_key
-     FROM quick_agents qa
-     JOIN quick_agent_search_results qasr ON qasr.agent_id = qa.id
-     JOIN quick_agent_searches qas ON qas.id = qasr.search_id
-     WHERE qas.user_id = ?1`,
+    `SELECT DISTINCT lower(agent_name || '::' || agency) AS normalized_key
+     FROM quick_submissions
+     WHERE user_id = ?1`,
     [userId]
   );
-  return new Set(rows.map((row) => row.normalized_key));
+  return new Set(rows.map((row) => row.normalized_key.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")));
 }
 
 function markSeenBefore(agents: AgentRecord[], seenKeys: Set<string>) {
@@ -383,6 +381,12 @@ function chunkArray<T>(items: T[], size: number) {
     chunks.push(items.slice(index, index + size));
   }
   return chunks;
+}
+
+function timeoutSignal(timeoutMs: number) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  return { signal: controller.signal, clear: () => clearTimeout(timeout) };
 }
 
 function stripHtml(value: string) {
@@ -633,9 +637,11 @@ async function generateAgentCandidates(env: Env, body: Record<string, unknown>) 
   };
 
   let response: Response;
+  const timeout = timeoutSignal(DISCOVERY_PROVIDER_TIMEOUT_MS);
   try {
     response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
+      signal: timeout.signal,
       headers: {
         authorization: `Bearer ${env.OPENAI_API_KEY}`,
         "content-type": "application/json",
@@ -650,7 +656,7 @@ async function generateAgentCandidates(env: Env, body: Record<string, unknown>) 
           },
           { role: "user", content: prompt },
         ],
-        max_output_tokens: 16000,
+        max_output_tokens: 8000,
         text: {
           format: {
             type: "json_schema",
@@ -663,6 +669,8 @@ async function generateAgentCandidates(env: Env, body: Record<string, unknown>) 
     });
   } catch (error) {
     throw error;
+  } finally {
+    timeout.clear();
   }
   const data = await response.json() as { error?: { message?: string } };
   if (!response.ok) throw badRequest(data.error?.message || "Agent discovery failed.", response.status);
@@ -674,15 +682,22 @@ async function generateAgentCandidates(env: Env, body: Record<string, unknown>) 
 async function generateGeminiCandidates(env: Env, body: Record<string, unknown>) {
   if (!env.GEMINI_API_KEY) throw badRequest("Gemini discovery is not configured.", 503);
   const model = clean(env.GEMINI_MODEL) || "gemini-2.5-flash";
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: candidateDiscoveryPrompt(body) }] }],
-      tools: [{ google_search: {} }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 12000 },
-    }),
-  });
+  const timeout = timeoutSignal(DISCOVERY_PROVIDER_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`, {
+      method: "POST",
+      signal: timeout.signal,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: candidateDiscoveryPrompt(body) }] }],
+        tools: [{ google_search: {} }],
+        generationConfig: { temperature: 0.2, maxOutputTokens: 8000 },
+      }),
+    });
+  } finally {
+    timeout.clear();
+  }
   const data = await response.json() as {
     error?: { message?: string };
     candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
@@ -698,21 +713,28 @@ async function generateGeminiCandidates(env: Env, body: Record<string, unknown>)
 
 async function generateClaudeCandidates(env: Env, body: Record<string, unknown>) {
   if (!env.ANTHROPIC_API_KEY) throw badRequest("Claude discovery is not configured.", 503);
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: clean(env.ANTHROPIC_MODEL) || "claude-sonnet-4-5",
-      max_tokens: 12000,
-      temperature: 0.2,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      messages: [{ role: "user", content: candidateDiscoveryPrompt(body) }],
-    }),
-  });
+  const timeout = timeoutSignal(DISCOVERY_PROVIDER_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      signal: timeout.signal,
+      headers: {
+        "x-api-key": env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: clean(env.ANTHROPIC_MODEL) || "claude-sonnet-4-5",
+        max_tokens: 8000,
+        temperature: 0.2,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        messages: [{ role: "user", content: candidateDiscoveryPrompt(body) }],
+      }),
+    });
+  } finally {
+    timeout.clear();
+  }
   const data = await response.json() as {
     error?: { message?: string };
     content?: Array<{ type?: string; text?: string }>;
@@ -757,26 +779,24 @@ async function generateDiscoveryPass(env: Env, body: Record<string, unknown>) {
 }
 
 async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>) {
-  const fulfilled: Array<PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>> = [];
-  const agents: AgentRecord[] = [];
-  const focuses = discoveryFocuses(body);
-
-  for (const focus of focuses) {
-    const excludeAgents = Array.from(new Set([
-      ...(Array.isArray(body.exclude_agents) ? (body.exclude_agents as unknown[]).map(clean).filter(Boolean) : []),
-      ...agents.map((agent) => `${agent.agent_name} — ${agent.agency}`),
-    ])).slice(0, 450);
-    let passResults: Array<PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>>;
-    try {
-      passResults = await generateDiscoveryPass(env, { ...body, discovery_focus: focus, exclude_agents: excludeAgents });
-    } catch (error) {
-      if (!fulfilled.length) throw error;
-      continue;
-    }
-    fulfilled.push(...passResults);
-    agents.splice(0, agents.length, ...dedupeAgents([...agents, ...passResults.flatMap((result) => result.value.agents)]).slice(0, MAX_AGENT_POOL_RESULTS));
-    if (agents.length >= DISCOVERY_PASS_TARGET) break;
+  const requestedFocus = clean(body.discovery_focus);
+  const focuses = requestedFocus ? [requestedFocus] : discoveryFocuses(body);
+  const baseExcludeAgents = Array.isArray(body.exclude_agents)
+    ? (body.exclude_agents as unknown[]).map(clean).filter(Boolean)
+    : [];
+  const passResults = await Promise.allSettled(focuses.map((focus) => generateDiscoveryPass(env, {
+    ...body,
+    discovery_focus: focus,
+    exclude_agents: baseExcludeAgents.slice(0, 450),
+  })));
+  const fulfilled = passResults
+    .filter((result): result is PromiseFulfilledResult<Array<PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>>> => result.status === "fulfilled")
+    .flatMap((result) => result.value);
+  if (!fulfilled.length) {
+    const firstError = passResults.find((result): result is PromiseRejectedResult => result.status === "rejected")?.reason;
+    throw firstError instanceof Response ? firstError : badRequest(firstError instanceof Error ? firstError.message : "Discovery timed out before returning candidates.", 504);
   }
+  const agents = dedupeAgents(fulfilled.flatMap((result) => result.value.agents)).slice(0, MAX_AGENT_POOL_RESULTS);
 
   return {
     agents,
