@@ -216,6 +216,7 @@ type AgentSearchDiagnostics = {
   discovery_passes?: number;
   source_lanes?: string;
   source?: string;
+  error?: string;
 };
 
 function genreExpansionTerms(profile: Profile) {
@@ -270,6 +271,9 @@ function discoveryProgressText(total: number, lane: DiscoveryLane, diagnostics?:
   const raw = diagnostics?.raw_count || 0;
   const candidates = diagnostics?.candidate_count || 0;
   const accepted = diagnostics?.verified_count || 0;
+  if (diagnostics?.error) {
+    return `${total} agents showing. ${lane.id} live discovery is blocked: ${diagnostics.error}`;
+  }
   if (raw || candidates || accepted) {
     return `${total} agents showing. ${lane.id} found ${raw} raw, kept ${candidates}, added ${accepted}. Continuing source checks...`;
   }
@@ -976,6 +980,7 @@ ${profile.name || ""}`;
     let downloaded: AgentRecord[] = [];
     let successfulPasses = 0;
     let emptyLanes = 0;
+    let lastDiscoveryError = "";
     try {
       for (const [index, lane] of lanes.entries()) {
         setStatus(`Searching ${lane.id} lane ${index + 1}/${lanes.length}. ${downloaded.length} agents showing so far.`);
@@ -997,6 +1002,7 @@ ${profile.name || ""}`;
             }),
           }, session.token);
           successfulPasses += 1;
+          if (discovered.diagnostics?.error) lastDiscoveryError = discovered.diagnostics.error;
           const beforeCount = downloaded.length;
           downloaded = mergeAgentPools(downloaded, discovered.agents);
           emptyLanes = downloaded.length === beforeCount ? emptyLanes + 1 : 0;
@@ -1013,7 +1019,9 @@ ${profile.name || ""}`;
       }
       setStatus(downloaded.length
         ? `${downloaded.length} agents found. Use Run Intel on an agent when you are ready to prepare that submission.`
-        : "No matching agents came back yet. Try again in a moment.");
+        : lastDiscoveryError
+          ? `Live discovery is blocked: ${lastDiscoveryError}`
+          : "No matching agents came back yet. Try again in a moment.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Still checking live sources. Try again in a moment to pull in more agents.");
     } finally {

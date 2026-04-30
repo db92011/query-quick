@@ -90,6 +90,7 @@ type AgentSearchDiagnostics = {
   discovery_passes?: number;
   source_lanes?: string;
   source?: string;
+  error?: string;
 };
 
 type RouteVerificationResult = {
@@ -486,6 +487,22 @@ function extractJsonText(value: string) {
   const start = trimmed.indexOf("{");
   const end = trimmed.lastIndexOf("}");
   return start >= 0 && end > start ? trimmed.slice(start, end + 1) : "{\"agents\":[]}";
+}
+
+async function errorMessage(error: unknown, fallback: string) {
+  if (error instanceof Response) {
+    try {
+      const data = await error.clone().json() as { error?: string; message?: string };
+      return data.error || data.message || fallback;
+    } catch {
+      try {
+        return await error.clone().text() || fallback;
+      } catch {
+        return fallback;
+      }
+    }
+  }
+  return error instanceof Error ? error.message : fallback;
 }
 
 function candidateToAgent(candidate: AgentCandidate): AgentRecord {
@@ -1422,7 +1439,23 @@ export async function handleAgentDiscover(request: Request, env: Env) {
   const key = cacheKey(body);
   const seenKeys = await userSeenAgentKeys(env, session.user.id);
   const storedAgents = body.include_stored_pool === false ? [] : await storedOpenAgentPool(env, body);
-  const liveDiscovered = await generateLiveCandidatePool(env, body);
+  let liveDiscovered: { agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics };
+  try {
+    liveDiscovered = await generateLiveCandidatePool(env, body);
+  } catch (error) {
+    liveDiscovered = {
+      agents: [],
+      diagnostics: {
+        raw_count: 0,
+        candidate_count: 0,
+        verified_count: 0,
+        discovery_passes: 0,
+        source_lanes: clean(body.discovery_lane),
+        source: "live_discovery_failed",
+        error: await errorMessage(error, "Live discovery failed before returning candidates."),
+      },
+    };
+  }
   const discovered: { agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics } = {
     agents: dedupeAgents([...storedAgents, ...liveDiscovered.agents]),
     diagnostics: {
