@@ -101,7 +101,7 @@ type AgentSearchDiagnostics = {
 };
 
 type SearchSnippet = {
-  source: "google" | "bing";
+  source: "google" | "bing" | "gemini-google";
   title: string;
   url: string;
   snippet: string;
@@ -123,7 +123,7 @@ const MAX_AGENT_POOL_RESULTS = 750;
 const ENRICHMENT_BATCH_SIZE = 12;
 const TARGET_AGENT_POOL_SIZE = 337;
 const DISCOVERY_PROVIDER_TIMEOUT_MS = 65000;
-const SEARCH_PROVIDER_TIMEOUT_MS = 12000;
+const SEARCH_PROVIDER_TIMEOUT_MS = 25000;
 const SEARCH_RESULTS_PER_PROVIDER = 8;
 
 const coreDiscoverySources = [
@@ -757,7 +757,7 @@ function sourceCandidateList(body: Record<string, unknown>) {
     .slice(0, MAX_AGENT_POOL_RESULTS);
 }
 
-async function candidatesFromRaw(rawAgents: AgentCandidate[]) {
+async function candidatesFromRaw(rawAgents: AgentCandidate[], diagnosticsPatch: Partial<AgentSearchDiagnostics> = {}) {
   const candidates = rawAgents.map(candidateToAgent);
   const filtered = candidates.filter((agent) => {
     if (!agent.agent_name || !agent.agency) return false;
@@ -775,6 +775,7 @@ async function candidatesFromRaw(rawAgents: AgentCandidate[]) {
       candidate_count: filtered.length,
       verified_count: verified.length,
       soft_verified_count: verified.filter((agent) => agent.submission_route_verified === false).length,
+      ...diagnosticsPatch,
     },
   };
 }
@@ -840,14 +841,21 @@ async function generateGeminiCandidates(env: Env, body: Record<string, unknown>)
   }
   const data = await response.json() as {
     error?: { message?: string };
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    candidates?: Array<{
+      content?: { parts?: Array<{ text?: string }> };
+      groundingMetadata?: { groundingChunks?: Array<{ web?: { uri?: string; title?: string } }> };
+    }>;
   };
   if (!response.ok) throw badRequest(data.error?.message || "Gemini discovery failed.", response.status);
+  const groundedSources = parseGeminiGroundedSourceSnippets(data);
   const text = (data.candidates || [])
     .flatMap((candidate) => candidate.content?.parts || [])
     .map((part) => part.text || "")
     .join("\n");
-  return candidatesFromRaw(parseAgentCandidates(text));
+  return candidatesFromRaw(parseAgentCandidates(text), {
+    search_result_count: groundedSources.length,
+    search_context_used: groundedSources.length > 0,
+  });
 }
 
 async function generateClaudeCandidates(env: Env, body: Record<string, unknown>) {
@@ -980,12 +988,123 @@ async function fetchBingSearchSnippets(env: Env, query: string): Promise<SearchS
   }
 }
 
+function geminiGroundedSourcePrompt(body: Record<string, unknown>, queries: string[]) {
+  return `Use Google Search grounding to find current public web leads for Query Quick literary agent discovery.
+
+Project:
+- Genre: ${clean(body.genre)}
+- Subgenre: ${clean(body.subgenre)}
+- Category: ${clean(body.category)}
+- Discovery lane: ${clean(body.discovery_lane) || "general"}
+- Discovery focus: ${clean(body.discovery_focus) || "current open literary agent source leads"}
+
+Search these ideas:
+${queries.map((query) => `- ${query}`).join("\n")}
+
+Return 10-16 source leads when available. Prioritize specific agent profile pages, agency submission guideline pages, QueryManager pages, QueryTracker public pages, Manuscript Wish List pages, Reedsy pages, Publishers Marketplace/public profile pages, and interviews that name live submission interests.
+Avoid generic advice posts unless they name specific agents and current submission routes.
+Do not include pages that clearly say the agent is closed to queries.
+
+Return JSON only:
+{
+  "results": [
+    {
+      "title": "",
+      "url": "",
+      "snippet": ""
+    }
+  ]
+}`;
+}
+
+function parseGeminiGroundedSourceSnippets(data: {
+  candidates?: Array<{
+    content?: { parts?: Array<{ text?: string }> };
+    groundingMetadata?: {
+      groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
+    };
+  }>;
+}) {
+  const snippets: SearchSnippet[] = [];
+  const text = (data.candidates || [])
+    .flatMap((candidate) => candidate.content?.parts || [])
+    .map((part) => part.text || "")
+    .join("\n");
+  try {
+    const parsed = JSON.parse(extractJsonText(text)) as { results?: Array<{ title?: string; url?: string; snippet?: string }> };
+    snippets.push(...(parsed.results || []).map((item) => ({
+      source: "gemini-google" as const,
+      title: clean(item.title),
+      url: clean(item.url),
+      snippet: clean(item.snippet),
+    })));
+  } catch {
+    // Grounding metadata below still gives us usable source leads when Gemini wraps or truncates the JSON.
+  }
+  for (const candidate of data.candidates || []) {
+    for (const chunk of candidate.groundingMetadata?.groundingChunks || []) {
+      const uri = clean(chunk.web?.uri);
+      if (!uri) continue;
+      snippets.push({
+        source: "gemini-google",
+        title: clean(chunk.web?.title) || "Google grounded source",
+        url: uri,
+        snippet: "Source returned by Gemini Google Search grounding.",
+      });
+    }
+  }
+  const seen = new Set<string>();
+  return snippets.filter((snippet) => {
+    if (!snippet.title || !validUrl(snippet.url)) return false;
+    const key = snippet.url.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function fetchGeminiGroundedSearchSnippets(env: Env, body: Record<string, unknown>, queries: string[]): Promise<SearchSnippetResult> {
+  if (!env.GEMINI_API_KEY) return { snippets: [], errors: [] };
+  const model = clean(env.GEMINI_MODEL) || "gemini-2.5-flash";
+  const timeout = timeoutSignal(SEARCH_PROVIDER_TIMEOUT_MS);
+  try {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`, {
+      method: "POST",
+      signal: timeout.signal,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: geminiGroundedSourcePrompt(body, queries) }] }],
+        tools: [{ google_search: {} }],
+        generationConfig: { temperature: 0.1, maxOutputTokens: 4000 },
+      }),
+    });
+    const data = await response.json() as {
+      error?: { message?: string };
+      candidates?: Array<{
+        content?: { parts?: Array<{ text?: string }> };
+        groundingMetadata?: { groundingChunks?: Array<{ web?: { uri?: string; title?: string } }> };
+      }>;
+    };
+    if (!response.ok) {
+      return { snippets: [], errors: [`Gemini Google Search ${response.status}: ${clean(data.error?.message) || "request failed"}`] };
+    }
+    return { snippets: parseGeminiGroundedSourceSnippets(data).slice(0, 20), errors: [] };
+  } catch {
+    return { snippets: [], errors: ["Gemini Google Search timed out or could not be reached."] };
+  } finally {
+    timeout.clear();
+  }
+}
+
 async function searchSnippetsForLane(env: Env, body: Record<string, unknown>) {
   const queries = searchQueriesForLane(body);
-  const results = await Promise.all(queries.flatMap((query) => [
-    fetchGoogleSearchSnippets(env, query),
-    fetchBingSearchSnippets(env, query),
-  ]));
+  const results = await Promise.all([
+    fetchGeminiGroundedSearchSnippets(env, body, queries),
+    ...queries.flatMap((query) => [
+      fetchGoogleSearchSnippets(env, query),
+      fetchBingSearchSnippets(env, query),
+    ]),
+  ]);
   const seen = new Set<string>();
   const snippets = results.flatMap((result) => result.snippets).filter((result) => {
     const key = result.url.toLowerCase();
@@ -1069,18 +1188,24 @@ async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>
     const withSearchDiagnostics = (
       providerResult: PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>,
       used: boolean
-    ) => ({
-      ...providerResult,
-      value: {
-        ...providerResult.value,
-        diagnostics: {
-          ...providerResult.value.diagnostics,
-          search_result_count: snippets.length,
-          search_context_used: used,
-          search_provider_errors: searchProviderErrors,
+    ) => {
+      const providerSearchCount = providerResult.value.diagnostics.search_result_count || 0;
+      return {
+        ...providerResult,
+        value: {
+          ...providerResult.value,
+          diagnostics: {
+            ...providerResult.value.diagnostics,
+            search_result_count: providerSearchCount + snippets.length,
+            search_context_used: used || Boolean(providerResult.value.diagnostics.search_context_used),
+            search_provider_errors: Array.from(new Set([
+              ...(providerResult.value.diagnostics.search_provider_errors || []),
+              ...searchProviderErrors,
+            ])).slice(0, 4),
+          },
         },
-      },
-    });
+      };
+    };
     if (!snippets.length) {
       if (baseResult.length) return baseResult.map((providerResult) => withSearchDiagnostics(providerResult, false));
       throw baseError instanceof Response ? baseError : badRequest(baseError instanceof Error ? baseError.message : "Discovery did not return source leads.", 502);

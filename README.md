@@ -84,3 +84,5 @@ Expected Worker secrets:
 - `STRIPE_SECRET_KEY`
 - `STRIPE_PRICE_ID`
 - optional `EMAIL_WEBHOOK_URL`
+
+Gemini is the primary Google-backed source lane. Query Quick uses `GEMINI_API_KEY` with Gemini Google Search grounding to gather live source leads and grounded agent candidates. The `GOOGLE_SEARCH_*` secrets are legacy/optional Custom Search JSON API settings and are not required for the Google AI path.
