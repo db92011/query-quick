@@ -182,6 +182,7 @@ const packetOrder: PacketKey[] = [
 ];
 
 const maxConcurrentIntel = 2;
+const targetAgentPoolSize = 337;
 
 const agentSearchActivity = [
   "Opening public agent records.",
@@ -213,6 +214,8 @@ type AgentSearchDiagnostics = {
   raw_count?: number;
   candidate_count?: number;
   verified_count?: number;
+  search_result_count?: number;
+  search_context_used?: boolean;
   discovery_passes?: number;
   source_lanes?: string;
   source?: string;
@@ -225,19 +228,34 @@ function genreExpansionTerms(profile: Profile) {
   const category = profile.category.trim() || "this category";
   const combined = `${genre} ${subgenre}`.toLowerCase();
   const terms = [genre, subgenre, category];
+  if (/romance|rom-?com|romantasy|love story|historical romance|paranormal romance|contemporary romance/.test(combined)) {
+    terms.push("romance", "romantic comedy", "contemporary romance", "historical romance", "paranormal romance", "romantasy");
+  }
   if (/upmarket|women|woman|book club|rom-?com|romance|literary|commercial/.test(combined)) {
     terms.push("women's fiction", "book club fiction", "upmarket fiction", "literary fiction", "commercial fiction", "crossover fiction");
   }
-  if (/fantasy|speculative|sci[- ]?fi|science fiction|horror|paranormal/.test(combined)) {
-    terms.push("speculative fiction", "fantasy", "science fiction", "horror", "crossover fiction");
+  if (/fantasy|romantasy|speculative|sff|sci[- ]?fi|science fiction|horror|paranormal|supernatural|dystopian/.test(combined)) {
+    terms.push("speculative fiction", "SFF", "fantasy", "science fiction", "sci-fi", "horror", "paranormal", "crossover fiction");
   }
   if (/thriller|mystery|crime|suspense|noir/.test(combined)) {
-    terms.push("thriller", "mystery", "crime fiction", "suspense", "commercial fiction");
+    terms.push("thriller", "mystery", "crime fiction", "suspense", "noir", "commercial fiction");
+  }
+  if (/historical/.test(combined)) {
+    terms.push("historical fiction", "historical novel", "historical");
+  }
+  if (/\bya\b|young adult|teen/.test(combined) || /\bya\b|young adult/.test(category.toLowerCase())) {
+    terms.push("young adult", "YA", "teen fiction");
+  }
+  if (/middle grade|\bmg\b|kidlit|children/.test(combined) || /middle grade|children/.test(category.toLowerCase())) {
+    terms.push("middle grade", "MG", "kidlit", "children's books");
+  }
+  if (/picture book|chapter book|early reader/.test(combined)) {
+    terms.push("picture book", "chapter book", "early reader", "children's books");
   }
   if (/memoir|narrative nonfiction|nonfiction|self-help|business|history|essay/.test(combined)) {
-    terms.push("narrative nonfiction", "memoir", "nonfiction", "prescriptive nonfiction", "proposal-driven nonfiction");
+    terms.push("narrative nonfiction", "memoir", "nonfiction", "prescriptive nonfiction", "proposal-driven nonfiction", "essay collection");
   }
-  return Array.from(new Set(terms.map((term) => term.toLowerCase()))).slice(0, 12);
+  return Array.from(new Set(terms.map((term) => term.toLowerCase()))).slice(0, 18);
 }
 
 function discoveryLanes(profile: Profile): DiscoveryLane[] {
@@ -254,6 +272,8 @@ function discoveryLanes(profile: Profile): DiscoveryLane[] {
     { id: "newer-agents", source: "new agent announcements, agency staff pages, interviews, and public profiles", focus: `newer and associate literary agents building lists in ${genre}, ${subgenre}, or adjacent fit terms` },
     { id: "boutique", source: "boutique and independent agency websites", focus: `independent agencies and boutique agencies accepting ${genre}, ${subgenre}, or adjacent fit terms` },
     { id: "deep-directory", source: "deep public directory/profile search", focus: `deep directory pass for additional open ${genre}, ${subgenre}, and adjacent agents not already found` },
+    { id: "google", source: "Google Programmable Search source snippets", focus: `Google search pass for additional ${category} ${genre} literary agents accepting ${subgenre}; prioritize profile, guideline, and directory pages not already found` },
+    { id: "bing", source: "Bing Web Search source snippets", focus: `Bing search pass for additional ${category} ${genre} literary agents accepting ${subgenre}; prioritize profile, guideline, and directory pages not already found` },
   ];
 }
 
@@ -271,11 +291,13 @@ function discoveryProgressText(total: number, lane: DiscoveryLane, diagnostics?:
   const raw = diagnostics?.raw_count || 0;
   const candidates = diagnostics?.candidate_count || 0;
   const accepted = diagnostics?.verified_count || 0;
+  const snippets = diagnostics?.search_result_count || 0;
   if (diagnostics?.error) {
     return `${total} agents showing. ${lane.id} live discovery is blocked: ${diagnostics.error}`;
   }
   if (raw || candidates || accepted) {
-    return `${total} agents showing. ${lane.id} found ${raw} raw, kept ${candidates}, added ${accepted}. Continuing source checks...`;
+    const sourceText = snippets ? ` using ${snippets} search-engine leads` : "";
+    return `${total} agents showing. ${lane.id} found ${raw} raw${sourceText}, kept ${candidates}, added ${accepted}. Continuing source checks...`;
   }
   return `${total} agents showing. ${lane.id} did not return usable names yet; checking the next source.`;
 }
@@ -974,10 +996,11 @@ ${profile.name || ""}`;
       return;
     }
     setIsSearching(true);
-    setAgents([]);
-    setStatus("Starting live agent discovery...");
+    setStatus(agents.length
+      ? `Expanding from ${agents.length} saved agents toward ${targetAgentPoolSize}.`
+      : "Starting live agent discovery...");
     const lanes = discoveryLanes(profile);
-    let downloaded: AgentRecord[] = [];
+    let downloaded: AgentRecord[] = agents;
     let successfulPasses = 0;
     let emptyLanes = 0;
     let lastDiscoveryError = "";
@@ -997,7 +1020,7 @@ ${profile.name || ""}`;
               discovery_source: lane.source,
               discovery_focus: lane.focus,
               expanded_genres: genreExpansionTerms(profile),
-              include_stored_pool: index === 0,
+              include_stored_pool: index === 0 || downloaded.length < targetAgentPoolSize,
               exclude_agents: downloaded.map((agent) => `${agent.agent_name} — ${agent.agency}`),
             }),
           }, session.token);
@@ -1008,17 +1031,18 @@ ${profile.name || ""}`;
           emptyLanes = downloaded.length === beforeCount ? emptyLanes + 1 : 0;
           setAgents(downloaded);
           setStatus(discoveryProgressText(downloaded.length, lane, discovered.diagnostics));
-          if (downloaded.length && emptyLanes >= 2) {
-            setStatus(`${downloaded.length} agents found. No new matches appeared in the last sources checked.`);
+          if (downloaded.length >= targetAgentPoolSize) {
+            setStatus(`${downloaded.length} agents found. Target pool is ready; run Agent Intel two at a time.`);
             break;
           }
+          if (emptyLanes >= 4) setStatus(`${downloaded.length} agents showing. Still below ${targetAgentPoolSize}; checking deeper sources.`);
         } catch (error) {
           const reason = error instanceof Error ? error.message : "One source did not respond";
           setStatus(`${downloaded.length} agents showing. ${lane.id} needs another pass: ${reason}`);
         }
       }
       setStatus(downloaded.length
-        ? `${downloaded.length} agents found. Use Run Intel on an agent when you are ready to prepare that submission.`
+        ? `${downloaded.length} agents found. ${downloaded.length < targetAgentPoolSize ? "Search again to keep expanding the pool." : "Run Agent Intel two at a time when you are ready to prepare submissions."}`
         : lastDiscoveryError
           ? `Live discovery is blocked: ${lastDiscoveryError}`
           : "No matching agents came back yet. Try again in a moment.");

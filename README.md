@@ -73,6 +73,12 @@ Use KeyMaster and the local lockbox for secret-bearing work. Do not put raw secr
 Expected Worker secrets:
 
 - `OPENAI_API_KEY`
+- `GEMINI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- optional `GOOGLE_SEARCH_API_KEY`
+- optional `GOOGLE_SEARCH_CX`
+- optional `BING_SEARCH_API_KEY`
+- optional `BING_SEARCH_ENDPOINT` for a current Bing-compatible search endpoint; Microsoft's public Bing Search APIs retired in 2025
 - `RESEND_API_KEY`
 - `RESEND_FROM_EMAIL`
 - `STRIPE_SECRET_KEY`

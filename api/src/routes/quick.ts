@@ -10,6 +10,10 @@ type Env = {
   GEMINI_MODEL?: string;
   ANTHROPIC_API_KEY?: string;
   ANTHROPIC_MODEL?: string;
+  GOOGLE_SEARCH_API_KEY?: string;
+  GOOGLE_SEARCH_CX?: string;
+  BING_SEARCH_API_KEY?: string;
+  BING_SEARCH_ENDPOINT?: string;
 };
 
 type AgentRecord = {
@@ -88,9 +92,18 @@ type AgentSearchDiagnostics = {
   verified_count: number;
   soft_verified_count?: number;
   discovery_passes?: number;
+  search_result_count?: number;
+  search_context_used?: boolean;
   source_lanes?: string;
   source?: string;
   error?: string;
+};
+
+type SearchSnippet = {
+  source: "google" | "bing";
+  title: string;
+  url: string;
+  snippet: string;
 };
 
 type RouteVerificationResult = {
@@ -102,8 +115,10 @@ type RouteVerificationResult = {
 
 const MAX_AGENT_POOL_RESULTS = 750;
 const ENRICHMENT_BATCH_SIZE = 12;
-const MAX_DISCOVERY_PASSES = 4;
+const TARGET_AGENT_POOL_SIZE = 337;
 const DISCOVERY_PROVIDER_TIMEOUT_MS = 65000;
+const SEARCH_PROVIDER_TIMEOUT_MS = 12000;
+const SEARCH_RESULTS_PER_PROVIDER = 8;
 
 const coreDiscoverySources = [
   "QueryTracker-style public search results",
@@ -112,6 +127,8 @@ const coreDiscoverySources = [
   "Manuscript Wish List and public agent profile pages",
   "agent interviews, podcast notes, and video guidance",
 ];
+
+const genericStoredTerms = new Set(["adult", "adult fiction", "fiction", "nonfiction", "this category"]);
 
 const allowedFileKinds = new Set([
   "query_letter",
@@ -166,24 +183,45 @@ function validUrl(value: string | undefined) {
   }
 }
 
+function validEmail(value: string | undefined) {
+  return /\S+@\S+\.\S+/.test(value || "");
+}
+
 function fallbackAgentSourceUrl(agentName: string, agency: string) {
   const query = encodeURIComponent([agentName, agency, "literary agent submissions"].filter(Boolean).join(" "));
   return `https://www.google.com/search?q=${query}`;
 }
 
+function hasUsableAgentLead(agent: Partial<AgentRecord | AgentCandidate>) {
+  const sourceUrls = Array.isArray(agent.source_urls) ? agent.source_urls : [];
+  return (
+    validEmail(agent.public_email) ||
+    validUrl(agent.submission_url) ||
+    validUrl(agent.source_url) ||
+    sourceUrls.some((url) => validUrl(clean(url)))
+  );
+}
+
 function filterAgents(agents: AgentRecord[]) {
   return agents.filter((agent) => {
-    if (!agent.agent_name || !agent.agency || !agent.genre_fit || !agent.requirements_summary) return false;
-    if (!agent.matched_genre || !agent.matched_subgenre || !agent.genre_evidence || !agent.subgenre_evidence || !agent.fit_reason) return false;
+    if (!agent.agent_name || !agent.agency || !agent.requirements_summary) return false;
+    const hasGenreSignal = [
+      agent.genre_fit,
+      agent.matched_genre,
+      agent.matched_subgenre,
+      agent.genre_evidence,
+      agent.subgenre_evidence,
+      agent.fit_reason,
+    ].some((value) => Boolean(clean(value)));
+    if (!hasGenreSignal) return false;
     if (!["email", "querytracker", "querymanager", "form", "portal"].includes(agent.query_method)) return false;
     if (!["open", "selective", "closed"].includes(agent.open_status)) return false;
     if (agent.open_status === "closed") return false;
-    if (!validUrl(agent.source_url)) return false;
+    if (!hasUsableAgentLead(agent)) return false;
     if (!agent.last_verified || Number.isNaN(Date.parse(agent.last_verified))) return false;
-    if (Number(agent.confidence_score || 0) < 80) return false;
-    if (!Array.isArray(agent.required_materials) || !agent.required_materials.includes("query_letter")) return false;
-    if (agent.query_method === "email") return /\S+@\S+\.\S+/.test(agent.public_email || "");
-    return validUrl(agent.submission_url);
+    if (Number(agent.confidence_score || 0) < 50) return false;
+    if (agent.query_method === "email") return validEmail(agent.public_email) && validUrl(agent.source_url);
+    return validUrl(agent.submission_url) || validUrl(agent.source_url);
   });
 }
 
@@ -489,6 +527,23 @@ function extractJsonText(value: string) {
   return start >= 0 && end > start ? trimmed.slice(start, end + 1) : "{\"agents\":[]}";
 }
 
+function parseAgentCandidates(value: string): AgentCandidate[] {
+  try {
+    const cleaned = value.trim().replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+    const parsed = JSON.parse(cleaned.startsWith("[") ? cleaned : extractJsonText(value)) as { agents?: unknown; candidates?: unknown };
+    const agents = Array.isArray(parsed.agents)
+      ? parsed.agents
+      : Array.isArray(parsed.candidates)
+        ? parsed.candidates
+        : Array.isArray(parsed)
+          ? parsed
+          : [];
+    return agents as AgentCandidate[];
+  } catch {
+    return [];
+  }
+}
+
 async function errorMessage(error: unknown, fallback: string) {
   if (error instanceof Response) {
     try {
@@ -505,7 +560,24 @@ async function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
+function inferCandidateQueryMethod(candidate: AgentCandidate): AgentRecord["query_method"] {
+  const routeText = [candidate.submission_url, candidate.source_url, ...(candidate.source_urls || [])]
+    .map(clean)
+    .join(" ")
+    .toLowerCase();
+  if (candidate.query_method === "email" && validEmail(candidate.public_email)) return "email";
+  if (routeText.includes("querymanager")) return "querymanager";
+  if (routeText.includes("querytracker")) return "querytracker";
+  if (candidate.query_method === "form") return "form";
+  if (candidate.query_method === "portal" || candidate.query_method === "querymanager" || candidate.query_method === "querytracker") {
+    return candidate.query_method;
+  }
+  if (validEmail(candidate.public_email)) return "email";
+  return "portal";
+}
+
 function candidateToAgent(candidate: AgentCandidate): AgentRecord {
+  const queryMethod = inferCandidateQueryMethod(candidate);
   const sourceUrl = validUrl(candidate.source_url)
     ? candidate.source_url
     : validUrl(candidate.submission_url)
@@ -521,7 +593,7 @@ function candidateToAgent(candidate: AgentCandidate): AgentRecord {
     subgenre_evidence: candidate.subgenre_evidence,
     fit_reason: candidate.fit_reason,
     email_opener: "",
-    query_method: candidate.query_method,
+    query_method: queryMethod,
     submission_url: candidate.submission_url || "",
     public_email: candidate.public_email || "",
     requirements_summary: "Building Agent Intel...",
@@ -544,25 +616,63 @@ function candidateToAgent(candidate: AgentCandidate): AgentRecord {
 function genreExpansionTerms(body: Record<string, unknown>) {
   const genre = clean(body.genre);
   const subgenre = clean(body.subgenre);
+  const category = clean(body.category);
   const combined = `${genre} ${subgenre}`.toLowerCase();
   const terms = [
     genre,
     subgenre,
-    clean(body.category),
+    category,
   ].filter(Boolean);
+  if (/romance|rom-?com|romantasy|love story|historical romance|paranormal romance|contemporary romance/.test(combined)) {
+    terms.push("romance", "romantic comedy", "contemporary romance", "historical romance", "paranormal romance", "romantasy");
+  }
   if (/upmarket|women|woman|book club|rom-?com|romance|literary|commercial/.test(combined)) {
     terms.push("women's fiction", "book club fiction", "upmarket fiction", "literary fiction", "commercial fiction", "crossover fiction");
   }
-  if (/fantasy|speculative|sci[- ]?fi|science fiction|horror|paranormal/.test(combined)) {
-    terms.push("speculative fiction", "fantasy", "science fiction", "horror", "crossover fiction");
+  if (/fantasy|romantasy|speculative|sff|sci[- ]?fi|science fiction|horror|paranormal|supernatural|dystopian/.test(combined)) {
+    terms.push("speculative fiction", "SFF", "fantasy", "science fiction", "sci-fi", "horror", "paranormal", "crossover fiction");
   }
   if (/thriller|mystery|crime|suspense|noir/.test(combined)) {
-    terms.push("thriller", "mystery", "crime fiction", "suspense", "commercial fiction");
+    terms.push("thriller", "mystery", "crime fiction", "suspense", "noir", "commercial fiction");
+  }
+  if (/historical/.test(combined)) {
+    terms.push("historical fiction", "historical novel", "historical");
+  }
+  if (/\bya\b|young adult|teen/.test(combined) || /\bya\b|young adult/.test(category.toLowerCase())) {
+    terms.push("young adult", "YA", "teen fiction");
+  }
+  if (/middle grade|\bmg\b|kidlit|children/.test(combined) || /middle grade|children/.test(category.toLowerCase())) {
+    terms.push("middle grade", "MG", "kidlit", "children's books");
+  }
+  if (/picture book|chapter book|early reader/.test(combined)) {
+    terms.push("picture book", "chapter book", "early reader", "children's books");
   }
   if (/memoir|narrative nonfiction|nonfiction|self-help|business|history|essay/.test(combined)) {
-    terms.push("narrative nonfiction", "memoir", "nonfiction", "prescriptive nonfiction", "proposal-driven nonfiction");
+    terms.push("narrative nonfiction", "memoir", "nonfiction", "prescriptive nonfiction", "proposal-driven nonfiction", "essay collection");
   }
-  return Array.from(new Set(terms.map((term) => term.toLowerCase()))).slice(0, 12);
+  return Array.from(new Set(terms.map((term) => term.toLowerCase()))).slice(0, 18);
+}
+
+function storedPoolTerms(body: Record<string, unknown>) {
+  const genre = clean(body.genre).toLowerCase();
+  const subgenre = clean(body.subgenre).toLowerCase();
+  const combined = `${genre} ${subgenre}`;
+  const terms = [
+    genre,
+    ...subgenre.split(/[\/,;|]+/).map((term) => term.trim()),
+  ].filter((term) => term && !genericStoredTerms.has(term));
+
+  if (/fantasy|romantasy|speculative|sff/.test(combined)) terms.push("fantasy", "romantasy", "speculative fiction", "SFF");
+  if (/sci[- ]?fi|science fiction/.test(combined)) terms.push("science fiction", "sci-fi", "SFF", "speculative fiction");
+  if (/horror|paranormal|supernatural/.test(combined)) terms.push("horror", "paranormal", "supernatural", "speculative fiction");
+  if (/thriller|mystery|crime|suspense|noir/.test(combined)) terms.push("thriller", "mystery", "crime fiction", "suspense", "noir");
+  if (/romance|rom-?com/.test(genre)) terms.push("romance", "romantic comedy", "rom-com", "contemporary romance");
+  if (/upmarket|women|woman|book club|literary|commercial/.test(combined)) terms.push("upmarket fiction", "women's fiction", "book club fiction", "literary fiction", "commercial fiction");
+  if (/middle grade|\bmg\b|kidlit|children/.test(combined)) terms.push("middle grade", "MG", "kidlit", "children's books");
+  if (/\bya\b|young adult|teen/.test(combined)) terms.push("young adult", "YA", "teen fiction");
+  if (/memoir|narrative nonfiction|self-help|business|history|essay/.test(combined)) terms.push("memoir", "narrative nonfiction", "prescriptive nonfiction", "essay collection");
+
+  return Array.from(new Set(terms.map((term) => term.toLowerCase()))).slice(0, 16);
 }
 
 function candidateDiscoveryPrompt(body: Record<string, unknown>) {
@@ -575,8 +685,12 @@ function candidateDiscoveryPrompt(body: Record<string, unknown>) {
   const expandedTerms = Array.isArray(body.expanded_genres)
     ? (body.expanded_genres as unknown[]).map(clean).filter(Boolean)
     : genreExpansionTerms(body);
+  const searchContext = clean(body.search_context);
   const exclusionText = alreadySeen.length
     ? `\nAvoid returning these already-seen agents unless there are no alternatives:\n${alreadySeen.map((agent) => `- ${agent}`).join("\n")}\nKeep searching deeper for different agents beyond this list.`
+    : "";
+  const searchContextText = searchContext
+    ? `\nSearch-engine source snippets for this pass:\n${searchContext}\nUse these snippets as leads only. Verify agent fit, open status, and submission route before returning a record.`
     : "";
   return `Find currently open literary agent submission candidates for this project.
 
@@ -594,7 +708,7 @@ Include an agent when you can identify the agent name, agency, genre/subgenre fi
 Do not include closed agents. Do not include QueryTracker/QueryManager pages that say not open, temporarily closed, or not accepting queries.
 Use current public web sources. Prefer the source lane above, then expand to ${coreDiscoverySources.join("; ")}.
 Search beyond the obvious top results and keep going through directories/profile pages so we can build depth over time. Treat adjacent categories as valid when the evidence supports the user's project.
-Do not write long explanations. Keep evidence to one short sentence per field.${exclusionText}
+Do not write long explanations. Keep evidence to one short sentence per field.${exclusionText}${searchContextText}
 
 Return JSON only in this exact shape:
 {
@@ -643,7 +757,8 @@ async function candidatesFromRaw(rawAgents: AgentCandidate[]) {
     if (!agent.agent_name || !agent.agency) return false;
     if (!["open", "selective"].includes(agent.open_status)) return false;
     if (Number(agent.confidence_score || 0) < 20) return false;
-    if (agent.query_method === "email") return /\S+@\S+\.\S+/.test(agent.public_email || "");
+    if (!hasUsableAgentLead(agent)) return false;
+    if (agent.query_method === "email") return validEmail(agent.public_email);
     return validUrl(agent.submission_url) || validUrl(agent.source_url);
   });
   const verified = await softVerifySubmissionRoutes(dedupeAgents(filtered));
@@ -695,9 +810,7 @@ async function generateAgentCandidates(env: Env, body: Record<string, unknown>) 
   if (data.status === "incomplete") {
     throw badRequest(`Agent discovery stopped before returning candidates: ${data.incomplete_details?.reason || "incomplete response"}.`, 502);
   }
-  const parsed = JSON.parse(extractJsonText(extractResponseText(data))) as { agents?: AgentCandidate[] };
-  const rawAgents = parsed.agents || [];
-  return candidatesFromRaw(rawAgents);
+  return candidatesFromRaw(parseAgentCandidates(extractResponseText(data)));
 }
 
 async function generateGeminiCandidates(env: Env, body: Record<string, unknown>) {
@@ -728,8 +841,7 @@ async function generateGeminiCandidates(env: Env, body: Record<string, unknown>)
     .flatMap((candidate) => candidate.content?.parts || [])
     .map((part) => part.text || "")
     .join("\n");
-  const parsed = JSON.parse(extractJsonText(text)) as { agents?: AgentCandidate[] };
-  return candidatesFromRaw(parsed.agents || []);
+  return candidatesFromRaw(parseAgentCandidates(text));
 }
 
 async function generateClaudeCandidates(env: Env, body: Record<string, unknown>) {
@@ -762,8 +874,116 @@ async function generateClaudeCandidates(env: Env, body: Record<string, unknown>)
   };
   if (!response.ok) throw badRequest(data.error?.message || "Claude discovery failed.", response.status);
   const text = (data.content || []).filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
-  const parsed = JSON.parse(extractJsonText(text)) as { agents?: AgentCandidate[] };
-  return candidatesFromRaw(parsed.agents || []);
+  return candidatesFromRaw(parseAgentCandidates(text));
+}
+
+function searchQueriesForLane(body: Record<string, unknown>) {
+  const genre = clean(body.genre);
+  const subgenre = clean(body.subgenre);
+  const category = clean(body.category);
+  const lane = clean(body.discovery_lane);
+  const expanded = genreExpansionTerms(body)
+    .filter((term) => term !== genre.toLowerCase() && term !== subgenre.toLowerCase() && term !== category.toLowerCase())
+    .slice(0, 5)
+    .join(" ");
+  const bases = Array.from(new Set([
+    [category, genre, subgenre].filter(Boolean).join(" "),
+    [category, expanded].filter(Boolean).join(" "),
+  ].filter(Boolean)));
+  const laneTerms: Record<string, string[]> = {
+    broad: ["literary agents accepting queries", "literary agent submissions"],
+    querytracker: ["QueryTracker literary agents open to queries", "querytracker accepting queries literary agent"],
+    querymanager: ["QueryManager literary agent submission form", "querymanager open submissions literary agent"],
+    mswl: ["Manuscript Wish List literary agent", "MSWL literary agent wishlist"],
+    agency: ["literary agency submission guidelines agents accepting queries", "agency submissions literary agent profile"],
+    "newer-agents": ["new literary agent building list", "associate literary agent accepting queries"],
+    boutique: ["boutique literary agency submissions", "independent literary agents accepting queries"],
+    "deep-directory": ["literary agent directory accepting submissions", "literary agent profile submissions"],
+    google: ["literary agents accepting queries", "agency profile submission guidelines"],
+    bing: ["literary agents accepting submissions", "new literary agents accepting queries"],
+  };
+  const terms = laneTerms[lane] || ["literary agents accepting queries", "submission guidelines literary agent"];
+  return terms
+    .flatMap((term) => bases.map((base) => [base, term].filter(Boolean).join(" ")))
+    .slice(0, 4);
+}
+
+async function fetchGoogleSearchSnippets(env: Env, query: string): Promise<SearchSnippet[]> {
+  if (!env.GOOGLE_SEARCH_API_KEY || !env.GOOGLE_SEARCH_CX) return [];
+  const timeout = timeoutSignal(SEARCH_PROVIDER_TIMEOUT_MS);
+  try {
+    const url = new URL("https://customsearch.googleapis.com/customsearch/v1");
+    url.searchParams.set("key", env.GOOGLE_SEARCH_API_KEY);
+    url.searchParams.set("cx", env.GOOGLE_SEARCH_CX);
+    url.searchParams.set("q", query);
+    url.searchParams.set("num", String(SEARCH_RESULTS_PER_PROVIDER));
+    const response = await fetch(url.toString(), { signal: timeout.signal });
+    const data = await response.json() as {
+      items?: Array<{ title?: string; link?: string; snippet?: string }>;
+    };
+    if (!response.ok) return [];
+    return (data.items || []).map((item) => ({
+      source: "google" as const,
+      title: clean(item.title),
+      url: clean(item.link),
+      snippet: clean(item.snippet),
+    })).filter((item) => item.title && validUrl(item.url));
+  } catch {
+    return [];
+  } finally {
+    timeout.clear();
+  }
+}
+
+async function fetchBingSearchSnippets(env: Env, query: string): Promise<SearchSnippet[]> {
+  if (!env.BING_SEARCH_API_KEY || !env.BING_SEARCH_ENDPOINT) return [];
+  const timeout = timeoutSignal(SEARCH_PROVIDER_TIMEOUT_MS);
+  try {
+    const url = new URL(env.BING_SEARCH_ENDPOINT);
+    url.searchParams.set("q", query);
+    url.searchParams.set("count", String(SEARCH_RESULTS_PER_PROVIDER));
+    url.searchParams.set("mkt", "en-US");
+    url.searchParams.set("responseFilter", "Webpages");
+    const response = await fetch(url.toString(), {
+      signal: timeout.signal,
+      headers: { "Ocp-Apim-Subscription-Key": env.BING_SEARCH_API_KEY },
+    });
+    const data = await response.json() as {
+      webPages?: { value?: Array<{ name?: string; url?: string; snippet?: string }> };
+    };
+    if (!response.ok) return [];
+    return (data.webPages?.value || []).map((item) => ({
+      source: "bing" as const,
+      title: clean(item.name),
+      url: clean(item.url),
+      snippet: clean(item.snippet),
+    })).filter((item) => item.title && validUrl(item.url));
+  } catch {
+    return [];
+  } finally {
+    timeout.clear();
+  }
+}
+
+async function searchSnippetsForLane(env: Env, body: Record<string, unknown>) {
+  const queries = searchQueriesForLane(body);
+  const results = await Promise.all(queries.flatMap((query) => [
+    fetchGoogleSearchSnippets(env, query),
+    fetchBingSearchSnippets(env, query),
+  ]));
+  const seen = new Set<string>();
+  return results.flat().filter((result) => {
+    const key = result.url.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 20);
+}
+
+function formatSearchContext(snippets: SearchSnippet[]) {
+  return snippets.map((item, index) => (
+    `${index + 1}. [${item.source}] ${item.title}\n${item.url}\n${item.snippet}`
+  )).join("\n\n");
 }
 
 function discoveryLanes(body: Record<string, unknown>): DiscoveryLane[] {
@@ -780,7 +1000,9 @@ function discoveryLanes(body: Record<string, unknown>): DiscoveryLane[] {
     { id: "newer-agents", source: "new agent announcements, agency staff pages, interviews, and public profiles", focus: `newer and associate literary agents building lists in ${genre}, ${subgenre}, or adjacent fit terms` },
     { id: "boutique", source: "boutique and independent agency websites", focus: `independent agencies and boutique agencies accepting ${genre}, ${subgenre}, or adjacent fit terms` },
     { id: "deep-directory", source: "deep public directory/profile search", focus: `deep directory pass for additional open ${genre}, ${subgenre}, and adjacent agents not already found` },
-  ].slice(0, MAX_DISCOVERY_PASSES);
+    { id: "google", source: "Google Programmable Search source snippets", focus: `Google search pass for additional ${category} ${genre} literary agents accepting ${subgenre}; prioritize profile, guideline, and directory pages not already found` },
+    { id: "bing", source: "Bing Web Search source snippets", focus: `Bing search pass for additional ${category} ${genre} literary agents accepting ${subgenre}; prioritize profile, guideline, and directory pages not already found` },
+  ];
 }
 
 async function generateDiscoveryPass(env: Env, body: Record<string, unknown>) {
@@ -809,14 +1031,65 @@ async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>
   const baseExcludeAgents = Array.isArray(body.exclude_agents)
     ? (body.exclude_agents as unknown[]).map(clean).filter(Boolean)
     : [];
-  const passResults = await Promise.allSettled(lanes.map((lane) => generateDiscoveryPass(env, {
-    ...body,
-    discovery_lane: lane.id,
-    discovery_source: lane.source,
-    discovery_focus: lane.focus,
-    expanded_genres: genreExpansionTerms(body),
-    exclude_agents: baseExcludeAgents.slice(0, 450),
-  })));
+  const passResults = await Promise.allSettled(lanes.map(async (lane) => {
+    const laneBody = {
+      ...body,
+      discovery_lane: lane.id,
+      discovery_source: lane.source,
+      discovery_focus: lane.focus,
+      expanded_genres: genreExpansionTerms(body),
+      exclude_agents: baseExcludeAgents.slice(0, 450),
+    };
+    const snippetsPromise = searchSnippetsForLane(env, laneBody);
+    let baseResult: Array<PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>> = [];
+    let baseError: unknown = null;
+    try {
+      baseResult = await generateDiscoveryPass(env, laneBody);
+    } catch (error) {
+      baseError = error;
+    }
+    const snippets = await snippetsPromise;
+    const withSearchDiagnostics = (
+      providerResult: PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>,
+      used: boolean
+    ) => ({
+      ...providerResult,
+      value: {
+        ...providerResult.value,
+        diagnostics: {
+          ...providerResult.value.diagnostics,
+          search_result_count: snippets.length,
+          search_context_used: used,
+        },
+      },
+    });
+    if (!snippets.length) {
+      if (baseResult.length) return baseResult;
+      throw baseError instanceof Response ? baseError : badRequest(baseError instanceof Error ? baseError.message : "Discovery did not return source leads.", 502);
+    }
+    let searchResult: Array<PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>> = [];
+    try {
+      searchResult = await generateDiscoveryPass(env, {
+        ...body,
+        discovery_lane: lane.id,
+        discovery_source: `${lane.source}; Google/Bing source snippets`,
+        discovery_focus: lane.focus,
+        expanded_genres: genreExpansionTerms(body),
+        exclude_agents: [
+          ...baseExcludeAgents,
+          ...baseResult.flatMap((providerResult) => providerResult.value.agents.map((agent) => `${agent.agent_name} — ${agent.agency}`)),
+        ].slice(0, 450),
+        search_context: formatSearchContext(snippets),
+      });
+    } catch {
+      if (baseResult.length) return baseResult.map((providerResult) => withSearchDiagnostics(providerResult, false));
+      throw baseError instanceof Response ? baseError : badRequest(baseError instanceof Error ? baseError.message : "Discovery did not return source leads.", 502);
+    }
+    return [
+      ...baseResult,
+      ...searchResult.map((providerResult) => withSearchDiagnostics(providerResult, true)),
+    ];
+  }));
   const fulfilled = passResults
     .filter((result): result is PromiseFulfilledResult<Array<PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>>> => result.status === "fulfilled")
     .flatMap((result) => result.value);
@@ -834,6 +1107,7 @@ async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>
       verified_count: agents.length,
       soft_verified_count: fulfilled.reduce((sum, result) => sum + (result.value.diagnostics.soft_verified_count || 0), 0),
       discovery_passes: fulfilled.length,
+      search_result_count: Math.max(...fulfilled.map((result) => result.value.diagnostics.search_result_count || 0), 0),
       source_lanes: lanes.map((lane) => lane.id).join(","),
       source: "provider_pool",
     },
@@ -1058,6 +1332,18 @@ query_letter, concise_description, synopsis, first_pages, sample_chapters, propo
     };
   }
   const verified = filterAgents(await verifySubmissionRoutes(candidates)).map(normalizeAgent);
+  if (!verified.length) {
+    const softVerified = filterAgents(await softVerifySubmissionRoutes(candidates)).map(normalizeAgent);
+    return {
+      agents: softVerified,
+      diagnostics: {
+        raw_count: rawAgents.length,
+        candidate_count: candidates.length,
+        verified_count: softVerified.length,
+        soft_verified_count: softVerified.length,
+      },
+    };
+  }
   return {
     agents: verified,
     diagnostics: {
@@ -1226,9 +1512,27 @@ function rowToIntelAgent(row: {
 }
 
 async function storedOpenAgentPool(env: Env, body: Record<string, unknown>) {
-  const genre = clean(body.genre).toLowerCase();
+  const genre = clean(body.genre);
   if (!genre) return [];
-  const genreLike = `%${genre}%`;
+  const fields = [
+    "genre_fit",
+    "matched_genre",
+    "matched_subgenre",
+    "genre_evidence",
+    "subgenre_evidence",
+    "fit_reason",
+  ];
+  const maxTerms = Math.floor(99 / fields.length);
+  const terms = storedPoolTerms(body).slice(0, maxTerms);
+  const params: string[] = [];
+  const termClauses = terms.map((term) => {
+    const fieldClauses = fields.map((field) => {
+      params.push(`%${term}%`);
+      return `lower(${field}) LIKE ?${params.length}`;
+    });
+    return `(${fieldClauses.join(" OR ")})`;
+  });
+  params.push(String(TARGET_AGENT_POOL_SIZE));
   const rows = await all<Parameters<typeof rowToIntelAgent>[0]>(
     env.DB,
     `SELECT agent_name, agency, genre_fit, matched_genre, matched_subgenre, genre_evidence, subgenre_evidence,
@@ -1238,16 +1542,10 @@ async function storedOpenAgentPool(env: Env, body: Record<string, unknown>) {
             submission_route_notes, last_verified, confidence_score
      FROM quick_agents
      WHERE open_status IN ('open', 'selective')
-       AND (
-         lower(genre_fit) LIKE ?1 OR
-         lower(matched_genre) LIKE ?1 OR
-         lower(genre_evidence) LIKE ?1 OR
-         lower(subgenre_evidence) LIKE ?1 OR
-         lower(fit_reason) LIKE ?1
-       )
-     ORDER BY submission_route_verified DESC, last_seen_at DESC
-     LIMIT 250`,
-    [genreLike]
+       AND (${termClauses.join(" OR ")})
+     ORDER BY submission_route_verified DESC, confidence_score DESC, last_seen_at DESC
+     LIMIT ?${params.length}`,
+    params
   );
   return rows.map(rowToIntelAgent);
 }

@@ -13,6 +13,10 @@ type Env = {
   GEMINI_MODEL?: string;
   ANTHROPIC_API_KEY?: string;
   ANTHROPIC_MODEL?: string;
+  GOOGLE_SEARCH_API_KEY?: string;
+  GOOGLE_SEARCH_CX?: string;
+  BING_SEARCH_API_KEY?: string;
+  BING_SEARCH_ENDPOINT?: string;
   EMAIL_WEBHOOK_URL?: string;
   RESEND_API_KEY?: string;
   RESEND_FROM_EMAIL?: string;
