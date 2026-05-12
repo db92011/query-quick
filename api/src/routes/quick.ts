@@ -94,6 +94,7 @@ type AgentSearchDiagnostics = {
   discovery_passes?: number;
   search_result_count?: number;
   search_context_used?: boolean;
+  search_provider_errors?: string[];
   source_lanes?: string;
   source?: string;
   error?: string;
@@ -104,6 +105,11 @@ type SearchSnippet = {
   title: string;
   url: string;
   snippet: string;
+};
+
+type SearchSnippetResult = {
+  snippets: SearchSnippet[];
+  errors: string[];
 };
 
 type RouteVerificationResult = {
@@ -908,8 +914,8 @@ function searchQueriesForLane(body: Record<string, unknown>) {
     .slice(0, 4);
 }
 
-async function fetchGoogleSearchSnippets(env: Env, query: string): Promise<SearchSnippet[]> {
-  if (!env.GOOGLE_SEARCH_API_KEY || !env.GOOGLE_SEARCH_CX) return [];
+async function fetchGoogleSearchSnippets(env: Env, query: string): Promise<SearchSnippetResult> {
+  if (!env.GOOGLE_SEARCH_API_KEY || !env.GOOGLE_SEARCH_CX) return { snippets: [], errors: [] };
   const timeout = timeoutSignal(SEARCH_PROVIDER_TIMEOUT_MS);
   try {
     const url = new URL("https://customsearch.googleapis.com/customsearch/v1");
@@ -920,23 +926,27 @@ async function fetchGoogleSearchSnippets(env: Env, query: string): Promise<Searc
     const response = await fetch(url.toString(), { signal: timeout.signal });
     const data = await response.json() as {
       items?: Array<{ title?: string; link?: string; snippet?: string }>;
+      error?: { message?: string };
     };
-    if (!response.ok) return [];
-    return (data.items || []).map((item) => ({
+    if (!response.ok) {
+      return { snippets: [], errors: [`Google search ${response.status}: ${clean(data.error?.message) || "request failed"}`] };
+    }
+    const snippets = (data.items || []).map((item) => ({
       source: "google" as const,
       title: clean(item.title),
       url: clean(item.link),
       snippet: clean(item.snippet),
     })).filter((item) => item.title && validUrl(item.url));
+    return { snippets, errors: [] };
   } catch {
-    return [];
+    return { snippets: [], errors: ["Google search timed out or could not be reached."] };
   } finally {
     timeout.clear();
   }
 }
 
-async function fetchBingSearchSnippets(env: Env, query: string): Promise<SearchSnippet[]> {
-  if (!env.BING_SEARCH_API_KEY || !env.BING_SEARCH_ENDPOINT) return [];
+async function fetchBingSearchSnippets(env: Env, query: string): Promise<SearchSnippetResult> {
+  if (!env.BING_SEARCH_API_KEY || !env.BING_SEARCH_ENDPOINT) return { snippets: [], errors: [] };
   const timeout = timeoutSignal(SEARCH_PROVIDER_TIMEOUT_MS);
   try {
     const url = new URL(env.BING_SEARCH_ENDPOINT);
@@ -950,16 +960,21 @@ async function fetchBingSearchSnippets(env: Env, query: string): Promise<SearchS
     });
     const data = await response.json() as {
       webPages?: { value?: Array<{ name?: string; url?: string; snippet?: string }> };
+      error?: { message?: string };
+      message?: string;
     };
-    if (!response.ok) return [];
-    return (data.webPages?.value || []).map((item) => ({
+    if (!response.ok) {
+      return { snippets: [], errors: [`Bing search ${response.status}: ${clean(data.error?.message || data.message) || "request failed"}`] };
+    }
+    const snippets = (data.webPages?.value || []).map((item) => ({
       source: "bing" as const,
       title: clean(item.name),
       url: clean(item.url),
       snippet: clean(item.snippet),
     })).filter((item) => item.title && validUrl(item.url));
+    return { snippets, errors: [] };
   } catch {
-    return [];
+    return { snippets: [], errors: ["Bing search timed out or could not be reached."] };
   } finally {
     timeout.clear();
   }
@@ -972,12 +987,14 @@ async function searchSnippetsForLane(env: Env, body: Record<string, unknown>) {
     fetchBingSearchSnippets(env, query),
   ]));
   const seen = new Set<string>();
-  return results.flat().filter((result) => {
+  const snippets = results.flatMap((result) => result.snippets).filter((result) => {
     const key = result.url.toLowerCase();
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   }).slice(0, 20);
+  const errors = Array.from(new Set(results.flatMap((result) => result.errors).filter(Boolean))).slice(0, 4);
+  return { snippets, errors };
 }
 
 function formatSearchContext(snippets: SearchSnippet[]) {
@@ -1048,7 +1065,7 @@ async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>
     } catch (error) {
       baseError = error;
     }
-    const snippets = await snippetsPromise;
+    const { snippets, errors: searchProviderErrors } = await snippetsPromise;
     const withSearchDiagnostics = (
       providerResult: PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>,
       used: boolean
@@ -1060,11 +1077,12 @@ async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>
           ...providerResult.value.diagnostics,
           search_result_count: snippets.length,
           search_context_used: used,
+          search_provider_errors: searchProviderErrors,
         },
       },
     });
     if (!snippets.length) {
-      if (baseResult.length) return baseResult;
+      if (baseResult.length) return baseResult.map((providerResult) => withSearchDiagnostics(providerResult, false));
       throw baseError instanceof Response ? baseError : badRequest(baseError instanceof Error ? baseError.message : "Discovery did not return source leads.", 502);
     }
     let searchResult: Array<PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>> = [];
@@ -1108,6 +1126,7 @@ async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>
       soft_verified_count: fulfilled.reduce((sum, result) => sum + (result.value.diagnostics.soft_verified_count || 0), 0),
       discovery_passes: fulfilled.length,
       search_result_count: Math.max(...fulfilled.map((result) => result.value.diagnostics.search_result_count || 0), 0),
+      search_provider_errors: Array.from(new Set(fulfilled.flatMap((result) => result.value.diagnostics.search_provider_errors || []))).slice(0, 4),
       source_lanes: lanes.map((lane) => lane.id).join(","),
       source: "provider_pool",
     },

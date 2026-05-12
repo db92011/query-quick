@@ -216,6 +216,7 @@ type AgentSearchDiagnostics = {
   verified_count?: number;
   search_result_count?: number;
   search_context_used?: boolean;
+  search_provider_errors?: string[];
   discovery_passes?: number;
   source_lanes?: string;
   source?: string;
@@ -292,12 +293,14 @@ function discoveryProgressText(total: number, lane: DiscoveryLane, diagnostics?:
   const candidates = diagnostics?.candidate_count || 0;
   const accepted = diagnostics?.verified_count || 0;
   const snippets = diagnostics?.search_result_count || 0;
+  const providerError = diagnostics?.search_provider_errors?.[0];
   if (diagnostics?.error) {
     return `${total} agents showing. ${lane.id} live discovery is blocked: ${diagnostics.error}`;
   }
   if (raw || candidates || accepted) {
     const sourceText = snippets ? ` using ${snippets} search-engine leads` : "";
-    return `${total} agents showing. ${lane.id} found ${raw} raw${sourceText}, kept ${candidates}, added ${accepted}. Continuing source checks...`;
+    const providerText = !snippets && providerError ? ` Search provider note: ${providerError}` : "";
+    return `${total} agents showing. ${lane.id} found ${raw} raw${sourceText}, kept ${candidates}, added ${accepted}.${providerText} Continuing source checks...`;
   }
   return `${total} agents showing. ${lane.id} did not return usable names yet; checking the next source.`;
 }
