@@ -43,6 +43,17 @@ Do not deploy this through the old `query-salon-api` Worker. Do not reuse Query 
 
 Query Quick is not a one-shot "find every agent" prompt. It is a subscriber-specific discovery and normalization engine.
 
+## Master Agent Index
+
+The master index is the durable truth layer behind discovery. `quick_agents` stores the canonical agent row, while the master facets split the record into:
+
+- `quick_agent_genres`: genre, subgenre, category, and fit evidence, so one agent can belong to many lanes.
+- `quick_agent_requirements`: submission route, required kit pieces, wishlist summary, opener guidance, and verification notes.
+- `quick_agent_sources`: public source/profile/submission URLs used to support the row.
+- `quick_agent_status_checks`: every open/closed route ping, including HTTP status and notes.
+
+Runtime search should load the stored genre-matched pool first, then use live discovery only to fill gaps or refresh stale rows.
+
 The runtime frame:
 
 1. Start with the subscriber profile: genre, subgenre, category, and project language.
