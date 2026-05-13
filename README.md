@@ -60,6 +60,7 @@ The runtime frame:
 2. Expand only that subscriber's genre boundary into adjacent fit terms.
 3. Load stored open/selective agents from the warm pool first.
 4. Run source lanes one at a time:
+   - AALA member directory and AALA profile pages
    - broad public agent/profile search
    - QueryTracker-style public search results
    - QueryManager public pages
@@ -67,6 +68,10 @@ The runtime frame:
    - agency websites and submission pages
    - newer/associate agent announcements and profiles
    - boutique/independent agency pages
+   - LiteraryAgencies.com genre lead pages
+   - The Wordling US literary agents list for agency/name coverage
+   - 1000 Literary Agents US listing pages for query-status and genre leads
+   - RegionalDirectory.us agency locator pages as low-confidence source leads
    - deep public directory/profile pass
 5. Normalize each lane into structured agent records.
 6. Deduplicate by agent plus agency.
@@ -76,6 +81,11 @@ The runtime frame:
 10. Stop a live run when source lanes stop producing new agents, then use Agent Intel as the second pass for requirements and route confidence.
 
 The product value is not just finding agents. The product value is finding, verifying, structuring, refreshing, and making agents actionable from the writer's kit.
+
+Source posture:
+
+- AALA is the strongest directory source because it exposes member subject focus and open/closed submission status, but Query Quick still verifies exact submission requirements before treating an agent as ready.
+- LiteraryAgencies.com, The Wordling, 1000 Literary Agents, and RegionalDirectory are lead sources. They help widen coverage; they do not by themselves prove current query status, wishlist fit, or submission requirements.
 
 ## Secrets
 

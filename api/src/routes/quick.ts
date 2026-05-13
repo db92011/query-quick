@@ -129,11 +129,24 @@ const SEARCH_PROVIDER_TIMEOUT_MS = 25000;
 const SEARCH_RESULTS_PER_PROVIDER = 8;
 
 const coreDiscoverySources = [
+  "AALA member directory and AALA agent profile pages with public subject-focus and submissions status",
   "QueryTracker-style public search results",
   "Reedsy public agent directory pages",
   "agency websites and agency submission pages",
   "Manuscript Wish List and public agent profile pages",
+  "LiteraryAgencies.com genre directory pages as broad lead lists",
+  "The Wordling US literary agents list as agency and agent-name coverage",
+  "1000 Literary Agents US listings as query-status and genre lead coverage",
+  "RegionalDirectory.us literary agency listings as low-confidence agency locator leads",
   "agent interviews, podcast notes, and video guidance",
+];
+
+const sourceReliabilityGuidance = [
+  "AALA profiles are high-priority professional directory sources for subject focus and open/closed status, but still verify the exact submission route and requirements from the AALA profile or agency page before marking a record ready.",
+  "LiteraryAgencies.com genre pages can seed agent names, agencies, and genre hints; treat those claims as leads until confirmed by AALA, agency, QueryManager, QueryTracker, MSWL, or another primary source.",
+  "The Wordling's US literary agents list is useful for agency and agent-name coverage, but it does not prove open status, genre fit, or submission requirements.",
+  "1000LiteraryAgents.com can seed query-status and broad genre leads, but its rows must be cross-checked against current AALA, agency, QueryManager, QueryTracker, or direct submission pages before use.",
+  "RegionalDirectory.us is only a low-confidence agency locator source because listings may be stale or non-agent-adjacent; never use it alone to mark an agent open or genre-matched.",
 ];
 
 const genericStoredTerms = new Set(["adult", "adult fiction", "fiction", "nonfiction", "this category"]);
@@ -734,6 +747,8 @@ Discovery focus: ${discoveryFocus || "broad genre/subgenre pool"}
 Discovery lane: ${discoveryLane || "general"}
 Preferred source lane: ${discoverySource || coreDiscoverySources.join(", ")}
 Expanded genre boundaries: ${expandedTerms.join(", ")}
+Source reliability rules:
+${sourceReliabilityGuidance.map((rule) => `- ${rule}`).join("\n")}
 
 Return as many unique agents as you can for this specific focus, aiming for 40-75 useful records in this pass when the public sources support it. Do not stop after a handful of obvious names.
 This is stage one only: discovery and live submission route candidates. Agent Intel will fill missing requirements later.
@@ -933,12 +948,18 @@ function searchQueriesForLane(body: Record<string, unknown>) {
   ].filter(Boolean)));
   const laneTerms: Record<string, string[]> = {
     broad: ["literary agents accepting queries", "literary agent submissions"],
+    aala: ["site:aalitagents.org/agents AALA agents submissions subject focus", "site:aalitagents.org/author literary agent submissions subject focus"],
     querytracker: ["QueryTracker literary agents open to queries", "querytracker accepting queries literary agent"],
     querymanager: ["QueryManager literary agent submission form", "querymanager open submissions literary agent"],
     mswl: ["Manuscript Wish List literary agent", "MSWL literary agent wishlist"],
     agency: ["literary agency submission guidelines agents accepting queries", "agency submissions literary agent profile"],
     "newer-agents": ["new literary agent building list", "associate literary agent accepting queries"],
     boutique: ["boutique literary agency submissions", "independent literary agents accepting queries"],
+    "source-directories": ["AALA LiteraryAgencies The Wordling 1000 Literary Agents agent directory", "literary agent directory genre agency accepting queries"],
+    literaryagencies: ["site:literaryagencies.com literary agents accepting new writers", "site:literaryagencies.com genre literary agents AALA Member"],
+    wordling: ["site:thewordling.com/literary-agents-us literary agents agency list", "The Wordling US literary agents agency"],
+    "1000literaryagents": ["site:1000literaryagents.com/literary-agents-us.php accepts queries literary agent", "1000 Literary Agents accepts queries genre"],
+    regionaldirectory: ["site:literary-agents.regionaldirectory.us literary agents agency", "RegionalDirectory literary agents agency website"],
     "deep-directory": ["literary agent directory accepting submissions", "literary agent profile submissions"],
     google: ["literary agents accepting queries", "agency profile submission guidelines"],
     bing: ["literary agents accepting submissions", "new literary agents accepting queries"],
@@ -1156,13 +1177,15 @@ function discoveryLanes(body: Record<string, unknown>): DiscoveryLane[] {
   const expanded = genreExpansionTerms(body).join(", ");
   return [
     { id: "broad", source: "public web search across literary agent profiles and directories", focus: `broad current ${category} ${genre} literary agents accepting ${subgenre}; include adjacent fit terms: ${expanded}` },
+    { id: "aala", source: "AALA member directory and AALA agent profile pages", focus: `AALA member agents with public subject-focus matches for ${genre}, ${subgenre}, or adjacent terms; use AALA open/closed status as a signal and still verify exact requirements` },
     { id: "querytracker", source: "QueryTracker-style public search results and public query-status snippets", focus: `QueryTracker agents open to ${genre}, ${subgenre}, and adjacent subscriber-specific fit terms` },
     { id: "querymanager", source: "QueryManager public submission pages and agency links", focus: `QueryManager submission forms for literary agents accepting ${genre}, ${subgenre}, or adjacent terms` },
     { id: "mswl", source: "Manuscript Wish List and public agent wishlist/profile pages", focus: `Manuscript Wish List agents seeking ${genre}, ${subgenre}, and adjacent fit terms` },
     { id: "agency", source: "agency websites, staff pages, and submission guidelines", focus: `agency submission pages naming agents open to ${genre}, ${subgenre}, and adjacent fit terms` },
     { id: "newer-agents", source: "new agent announcements, agency staff pages, interviews, and public profiles", focus: `newer and associate literary agents building lists in ${genre}, ${subgenre}, or adjacent fit terms` },
     { id: "boutique", source: "boutique and independent agency websites", focus: `independent agencies and boutique agencies accepting ${genre}, ${subgenre}, or adjacent fit terms` },
-    { id: "deep-directory", source: "deep public directory/profile search", focus: `deep directory pass for additional open ${genre}, ${subgenre}, and adjacent agents not already found` },
+    { id: "source-directories", source: "LiteraryAgencies.com, The Wordling, 1000 Literary Agents, and RegionalDirectory.us lead lists", focus: `secondary directory lead pass for ${genre}, ${subgenre}, and adjacent categories; use these sources for coverage, then confirm every useful lead through AALA, agency, QueryManager, QueryTracker, MSWL, or a direct submission page` },
+    { id: "deep-directory", source: "deep public directory/profile search", focus: `deep directory pass for additional open ${genre}, ${subgenre}, and adjacent agents not already found; prioritize AALA and primary agency pages over secondary directories` },
     { id: "google", source: "Google Programmable Search source snippets", focus: `Google search pass for additional ${category} ${genre} literary agents accepting ${subgenre}; prioritize profile, guideline, and directory pages not already found` },
     { id: "bing", source: "Bing Web Search source snippets", focus: `Bing search pass for additional ${category} ${genre} literary agents accepting ${subgenre}; prioritize profile, guideline, and directory pages not already found` },
   ];
