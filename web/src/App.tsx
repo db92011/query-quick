@@ -295,6 +295,9 @@ function discoveryProgressText(total: number, lane: DiscoveryLane, diagnostics?:
   const snippets = diagnostics?.search_result_count || 0;
   const providerError = diagnostics?.search_provider_errors?.[0];
   if (diagnostics?.error) {
+    if (total > 0) {
+      return `${total} agents downloaded. ${lane.id} live expansion note: ${diagnostics.error}`;
+    }
     return `${total} agents showing. ${lane.id} live discovery is blocked: ${diagnostics.error}`;
   }
   if (raw || candidates || accepted) {
@@ -320,6 +323,12 @@ function cleanEvidenceText(value: string) {
     .replace(/https?:\/\/\S+/g, "")
     .replace(/\s{2,}/g, " ")
     .trim();
+}
+
+function formatUtcDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, { timeZone: "UTC" }).format(date);
 }
 
 function validPacketKey(value: string): value is PacketKey {
@@ -878,7 +887,7 @@ ${body}`;
   function verifiedRouteText(agent: AgentRecord) {
     if (agent.submission_route_verified === false) return "Source-backed route. Open before sending.";
     if (!agent.submission_route_verified_at) return "Submission route verified.";
-    return `Submission route verified ${new Date(agent.submission_route_verified_at).toLocaleDateString()}.`;
+    return `Submission route verified ${formatUtcDate(agent.submission_route_verified_at)}.`;
   }
 
   async function copyRequiredKit(agent: AgentRecord) {

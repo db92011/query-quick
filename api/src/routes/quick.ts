@@ -124,8 +124,10 @@ type RouteVerificationResult = {
 const MAX_AGENT_POOL_RESULTS = 750;
 const ENRICHMENT_BATCH_SIZE = 12;
 const TARGET_AGENT_POOL_SIZE = 337;
-const DISCOVERY_PROVIDER_TIMEOUT_MS = 65000;
-const SEARCH_PROVIDER_TIMEOUT_MS = 25000;
+const DISCOVERY_PROVIDER_TIMEOUT_MS = 30000;
+const SEARCH_PROVIDER_TIMEOUT_MS = 12000;
+const STORED_POOL_DISCOVERY_BUDGET_MS = 18000;
+const EMPTY_POOL_DISCOVERY_BUDGET_MS = 70000;
 const SEARCH_RESULTS_PER_PROVIDER = 8;
 
 const coreDiscoverySources = [
@@ -1551,6 +1553,34 @@ query_letter, concise_description, synopsis, first_pages, sample_chapters, propo
   };
 }
 
+function discoveryTimeout(body: Record<string, unknown>, timeoutMs: number) {
+  return {
+    agents: [],
+    diagnostics: {
+      raw_count: 0,
+      candidate_count: 0,
+      verified_count: 0,
+      discovery_passes: 0,
+      source_lanes: clean(body.discovery_lane),
+      source: "live_discovery_timeout",
+      error: `Live discovery did not finish within ${Math.round(timeoutMs / 1000)} seconds. Showing saved agents first; search again to keep expanding.`,
+    } satisfies AgentSearchDiagnostics,
+  };
+}
+
+async function generateLiveCandidatePoolForResponse(env: Env, body: Record<string, unknown>, timeoutMs: number) {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>((resolve) => {
+    timeoutId = setTimeout(() => resolve(discoveryTimeout(body, timeoutMs)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([generateLiveCandidatePool(env, body), timeout]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 function submissionRequirementsForAgent(agent: AgentRecord) {
   return {
     query_method: agent.query_method,
@@ -2146,9 +2176,10 @@ export async function handleAgentDiscover(request: Request, env: Env) {
   const key = cacheKey(body);
   const seenKeys = await userSeenAgentKeys(env, session.user.id);
   const storedAgents = body.include_stored_pool === false ? [] : await storedOpenAgentPool(env, body);
+  const discoveryBudgetMs = storedAgents.length ? STORED_POOL_DISCOVERY_BUDGET_MS : EMPTY_POOL_DISCOVERY_BUDGET_MS;
   let liveDiscovered: { agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics };
   try {
-    liveDiscovered = await generateLiveCandidatePool(env, body);
+    liveDiscovered = await generateLiveCandidatePoolForResponse(env, body, discoveryBudgetMs);
   } catch (error) {
     liveDiscovered = {
       agents: [],

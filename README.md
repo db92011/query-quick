@@ -26,8 +26,13 @@ npm run build
 ```bash
 cd api
 npm install
+npm run db:migrate:local
 npm run check
 ```
+
+For local end-to-end testing, run the API with `npm run dev` and the web app with
+`npm run dev` in `web/`. The API accepts localhost origins during local development
+and returns a local dev magic link when email delivery is not configured.
 
 ## Cloudflare Shape
 

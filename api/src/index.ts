@@ -24,17 +24,44 @@ type Env = {
   STRIPE_PRICE_ID?: string;
 };
 
-function withCors(response: Response, origin: string) {
-  response.headers.set("access-control-allow-origin", origin);
+function configuredOrigins(env: Env) {
+  return String(env.APP_ORIGIN || "*")
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/$/, ""))
+    .filter(Boolean);
+}
+
+function isLocalOrigin(origin: string) {
+  try {
+    const url = new URL(origin);
+    return url.hostname === "localhost" || url.hostname === "127.0.0.1";
+  } catch {
+    return false;
+  }
+}
+
+function corsOrigin(request: Request, env: Env) {
+  const requestOrigin = request.headers.get("origin")?.replace(/\/$/, "");
+  const allowedOrigins = configuredOrigins(env);
+  const fallbackOrigin = allowedOrigins[0] || "*";
+
+  if (!requestOrigin) return fallbackOrigin;
+  if (fallbackOrigin === "*") return "*";
+  if (allowedOrigins.includes(requestOrigin) || isLocalOrigin(requestOrigin)) return requestOrigin;
+  return fallbackOrigin;
+}
+
+function withCors(request: Request, response: Response, env: Env) {
+  response.headers.set("access-control-allow-origin", corsOrigin(request, env));
   response.headers.set("access-control-allow-headers", "authorization, content-type, stripe-signature");
   response.headers.set("access-control-allow-methods", "GET,POST,OPTIONS");
+  response.headers.set("vary", "Origin");
   return response;
 }
 
 export default {
   async fetch(request: Request, env: Env) {
-    const origin = String(env.APP_ORIGIN || "*");
-    if (request.method === "OPTIONS") return withCors(new Response(null, { status: 204 }), origin);
+    if (request.method === "OPTIONS") return withCors(request, new Response(null, { status: 204 }), env);
 
     try {
       const url = new URL(request.url);
@@ -62,10 +89,10 @@ export default {
         response = textResponse("Not Found", 404);
       }
 
-      return withCors(response, origin);
+      return withCors(request, response, env);
     } catch (error) {
-      if (error instanceof Response) return withCors(error, origin);
-      return withCors(badRequest(error instanceof Error ? error.message : "Unknown error.", 500), origin);
+      if (error instanceof Response) return withCors(request, error, env);
+      return withCors(request, badRequest(error instanceof Error ? error.message : "Unknown error.", 500), env);
     }
   },
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {

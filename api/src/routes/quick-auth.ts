@@ -34,6 +34,29 @@ function isEmail(value: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
+function configuredOrigins(env: Env) {
+  return String(env.APP_ORIGIN || "http://127.0.0.1:4174")
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/$/, ""))
+    .filter(Boolean);
+}
+
+function isLocalOrigin(origin: string) {
+  try {
+    const url = new URL(origin);
+    return url.hostname === "localhost" || url.hostname === "127.0.0.1";
+  } catch {
+    return false;
+  }
+}
+
+function magicLinkOrigin(request: Request, env: Env) {
+  const requestOrigin = request.headers.get("origin")?.replace(/\/$/, "");
+  const origins = configuredOrigins(env);
+  if (requestOrigin && (origins.includes(requestOrigin) || isLocalOrigin(requestOrigin))) return requestOrigin;
+  return origins[0] || "http://127.0.0.1:4174";
+}
+
 async function sendMagicLink(env: Env, email: string, link: string) {
   if (env.RESEND_API_KEY && env.RESEND_FROM_EMAIL) {
     const response = await fetch("https://api.resend.com/emails", {
@@ -124,10 +147,10 @@ export async function handleQuickAuth(request: Request, env: Env, url: URL) {
       now.toISOString(),
     ]);
 
-    const origin = String(env.APP_ORIGIN || "http://127.0.0.1:4174").replace(/\/$/, "");
+    const origin = magicLinkOrigin(request, env);
     const link = `${origin}/auth/verify?token=${encodeURIComponent(token)}`;
     const delivery = await sendMagicLink(env, email, link);
-    const allowDevLink = env.ALLOW_DEV_MAGIC_LINKS === "true" || origin.includes("127.0.0.1") || origin.includes("localhost");
+    const allowDevLink = env.ALLOW_DEV_MAGIC_LINKS === "true" || isLocalOrigin(origin);
     return json({
       ok: true,
       delivered: delivery.delivered,
