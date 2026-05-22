@@ -149,6 +149,10 @@ type AgentSearchDiagnostics = {
   verified_count: number;
   soft_verified_count?: number;
   discovery_passes?: number;
+  inventory_offset?: number;
+  inventory_limit?: number;
+  inventory_total?: number;
+  inventory_next_offset?: number;
   search_result_count?: number;
   search_context_used?: boolean;
   search_provider_errors?: string[];
@@ -1222,6 +1226,9 @@ async function sourceOnlySeedUrls(env: Env, body: Record<string, unknown>, limit
 
 async function sourceOnlyDiscoveryPass(env: Env, body: Record<string, unknown>) {
   const seedUrls = await sourceOnlySeedUrls(env, body);
+  const inventoryWide = clean(body.inventory_scope) === "all";
+  const inventoryOffset = Math.max(0, Number(body.inventory_offset || 0));
+  const inventoryLimit = Math.max(1, Math.min(120, Number(body.inventory_limit || 80)));
   const docs = (await Promise.all(seedUrls.map(fetchSourceDocument))).filter((doc): doc is SourceDocument => Boolean(doc));
   console.log(JSON.stringify({
     event: "source_only_documents",
@@ -1258,8 +1265,16 @@ async function sourceOnlyDiscoveryPass(env: Env, body: Record<string, unknown>) 
     const key = `${candidate.agent_name} — ${candidate.agency}`.toLowerCase();
     return !excluded.has(key);
   });
-  return candidatesFromRaw(filtered, {
+  const batched = inventoryWide ? filtered.slice(inventoryOffset, inventoryOffset + inventoryLimit) : filtered;
+  const nextOffset = inventoryWide && filtered.length > inventoryOffset + inventoryLimit
+    ? inventoryOffset + inventoryLimit
+    : 0;
+  return candidatesFromRaw(batched, {
     discovery_passes: docs.length,
+    inventory_offset: inventoryWide ? inventoryOffset : undefined,
+    inventory_limit: inventoryWide ? inventoryLimit : undefined,
+    inventory_total: inventoryWide ? filtered.length : undefined,
+    inventory_next_offset: nextOffset || undefined,
     search_result_count: seedUrls.length,
     search_context_used: false,
     source: "source_only_validated_paths",
@@ -2120,6 +2135,10 @@ async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>
       verified_count: agents.length,
       soft_verified_count: fulfilled.reduce((sum, result) => sum + (result.value.diagnostics.soft_verified_count || 0), 0),
       discovery_passes: fulfilled.length,
+      inventory_offset: fulfilled.find((result) => result.value.diagnostics.inventory_offset !== undefined)?.value.diagnostics.inventory_offset,
+      inventory_limit: fulfilled.find((result) => result.value.diagnostics.inventory_limit !== undefined)?.value.diagnostics.inventory_limit,
+      inventory_total: Math.max(...fulfilled.map((result) => result.value.diagnostics.inventory_total || 0), 0),
+      inventory_next_offset: Math.max(...fulfilled.map((result) => result.value.diagnostics.inventory_next_offset || 0), 0) || undefined,
       search_result_count: Math.max(...fulfilled.map((result) => result.value.diagnostics.search_result_count || 0), 0),
       search_provider_errors: Array.from(new Set(fulfilled.flatMap((result) => result.value.diagnostics.search_provider_errors || []))).slice(0, 4),
       source_lanes: lanes.map((lane) => lane.id).join(","),
@@ -3642,6 +3661,8 @@ export async function handleAgentDiscover(request: Request, env: Env, ctx?: Exec
         discovery_focus: discoveryFocus,
         source_url: clean(body.source_url),
         inventory_scope: clean(body.inventory_scope),
+        inventory_offset: Math.max(0, Number(body.inventory_offset || 0)),
+        inventory_limit: Math.max(1, Math.min(120, Number(body.inventory_limit || 80))),
         expanded_genres: Array.isArray(body.expanded_genres) ? body.expanded_genres : genreExpansionTerms(body),
         include_stored_pool: false,
         exclude_agents: Array.isArray(body.exclude_agents) ? body.exclude_agents : [],
@@ -3807,6 +3828,8 @@ function bodyFromQueueMessage(message: AgentEngineQueueMessage) {
     discovery_source: clean(message.payload?.discovery_source || message.source_url),
     discovery_focus: clean(message.payload?.discovery_focus),
     inventory_scope: clean(message.payload?.inventory_scope),
+    inventory_offset: Math.max(0, Number(message.payload?.inventory_offset || 0)),
+    inventory_limit: Math.max(1, Math.min(120, Number(message.payload?.inventory_limit || 80))),
     expanded_genres: Array.isArray(message.payload?.expanded_genres) ? message.payload?.expanded_genres : undefined,
     exclude_agents: Array.isArray(message.payload?.exclude_agents) ? message.payload?.exclude_agents : [],
     include_stored_pool: false,
@@ -4000,6 +4023,9 @@ async function processAgentDiscoveryJob(env: Env, message: AgentEngineQueueMessa
     candidate_count: result.diagnostics.candidate_count,
     verified_count: result.diagnostics.verified_count,
     stored_count: result.agents.length,
+    inventory_offset: result.diagnostics.inventory_offset || 0,
+    inventory_total: result.diagnostics.inventory_total || 0,
+    inventory_next_offset: result.diagnostics.inventory_next_offset || 0,
     source: result.diagnostics.source || "",
   }));
   for (const agent of result.agents) {
@@ -4026,6 +4052,32 @@ async function processAgentDiscoveryJob(env: Env, message: AgentEngineQueueMessa
       category: clean(body.category),
       priority: 50,
       reason: "discovery-genre-fit",
+    });
+  }
+  const nextOffset = Number(result.diagnostics.inventory_next_offset || 0);
+  if (nextOffset > 0 && clean(body.source_url)) {
+    await enqueueAgentEngineJob(env, {
+      job_type: "agent-discovery",
+      genre: clean(body.genre),
+      subgenre: clean(body.subgenre),
+      category: clean(body.category),
+      tone: clean(body.tone),
+      audience: clean(body.audience),
+      source_url: clean(body.source_url),
+      priority: Math.max(30, Number(message.priority || 70) - 1),
+      reason: `${clean(message.reason) || "inventory-source"}:offset-${nextOffset}`,
+      payload: {
+        discovery_lane: clean(body.discovery_lane),
+        discovery_source: clean(body.discovery_source) || clean(body.source_url),
+        discovery_focus: clean(body.discovery_focus),
+        source_url: clean(body.source_url),
+        inventory_scope: clean(body.inventory_scope),
+        inventory_offset: nextOffset,
+        inventory_limit: Number(result.diagnostics.inventory_limit || 80),
+        expanded_genres: Array.isArray(body.expanded_genres) ? body.expanded_genres : genreExpansionTerms(body),
+        include_stored_pool: false,
+        exclude_agents: [],
+      },
     });
   }
 }
