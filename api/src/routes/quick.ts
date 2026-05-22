@@ -3384,8 +3384,9 @@ export async function handleAgentEngineQueue(batch: MessageBatch<AgentEngineQueu
       await markEngineJob(env, message.body.job_id, "done");
       message.ack();
     } catch (error) {
+      const failureMessage = await errorMessage(error, "Queue job failed.");
       await markEngineJob(env, message.body.job_id, "failed", {
-        error: error instanceof Error ? error.message : "Queue job failed.",
+        error: failureMessage,
       });
       message.retry({ delaySeconds: Math.min(3600, 60 * Math.max(1, message.attempts)) });
     }
