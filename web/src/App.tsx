@@ -181,34 +181,13 @@ const packetOrder: PacketKey[] = [
   "manuscript_status",
 ];
 
-const maxConcurrentIntel = 2;
-const targetAgentPoolSize = 337;
-
 const agentSearchActivity = [
-  "Opening public agent records.",
-  "Checking live submission paths.",
-  "Scanning agency profile pages.",
-  "Matching your genre criteria.",
-  "Matching your subgenre language.",
-  "Checking Manuscript Wish List.",
-  "Reviewing wishlist signals.",
-  "Checking QueryTracker routes.",
-  "Checking QueryManager routes.",
-  "Checking public email signals.",
-  "Looking for agent interviews.",
-  "Checking podcast guidance.",
-  "Checking video guidance.",
-  "Removing closed records.",
-  "Removing stale records.",
-  "Downloading source-backed agent rows.",
-  "Preparing Intel-ready results.",
+  "Reading prepared open-agent intelligence.",
+  "Normalizing your genre lane.",
+  "Ranking current open agents.",
+  "Checking prepared wishlist signals.",
+  "Returning submission-ready records.",
 ];
-
-type DiscoveryLane = {
-  id: string;
-  source: string;
-  focus: string;
-};
 
 type AgentSearchDiagnostics = {
   raw_count?: number;
@@ -222,91 +201,6 @@ type AgentSearchDiagnostics = {
   source?: string;
   error?: string;
 };
-
-function genreExpansionTerms(profile: Profile) {
-  const genre = profile.genre.trim() || "this genre";
-  const subgenre = profile.subgenre.trim() || "this subgenre";
-  const category = profile.category.trim() || "this category";
-  const combined = `${genre} ${subgenre}`.toLowerCase();
-  const terms = [genre, subgenre, category];
-  if (/romance|rom-?com|romantasy|love story|historical romance|paranormal romance|contemporary romance/.test(combined)) {
-    terms.push("romance", "romantic comedy", "contemporary romance", "historical romance", "paranormal romance", "romantasy");
-  }
-  if (/upmarket|women|woman|book club|rom-?com|romance|literary|commercial/.test(combined)) {
-    terms.push("women's fiction", "book club fiction", "upmarket fiction", "literary fiction", "commercial fiction", "crossover fiction");
-  }
-  if (/fantasy|romantasy|speculative|sff|sci[- ]?fi|science fiction|horror|paranormal|supernatural|dystopian/.test(combined)) {
-    terms.push("speculative fiction", "SFF", "fantasy", "science fiction", "sci-fi", "horror", "paranormal", "crossover fiction");
-  }
-  if (/thriller|mystery|crime|suspense|noir/.test(combined)) {
-    terms.push("thriller", "mystery", "crime fiction", "suspense", "noir", "commercial fiction");
-  }
-  if (/historical/.test(combined)) {
-    terms.push("historical fiction", "historical novel", "historical");
-  }
-  if (/\bya\b|young adult|teen/.test(combined) || /\bya\b|young adult/.test(category.toLowerCase())) {
-    terms.push("young adult", "YA", "teen fiction");
-  }
-  if (/middle grade|\bmg\b|kidlit|children/.test(combined) || /middle grade|children/.test(category.toLowerCase())) {
-    terms.push("middle grade", "MG", "kidlit", "children's books");
-  }
-  if (/picture book|chapter book|early reader/.test(combined)) {
-    terms.push("picture book", "chapter book", "early reader", "children's books");
-  }
-  if (/memoir|narrative nonfiction|nonfiction|self-help|business|history|essay/.test(combined)) {
-    terms.push("narrative nonfiction", "memoir", "nonfiction", "prescriptive nonfiction", "proposal-driven nonfiction", "essay collection");
-  }
-  return Array.from(new Set(terms.map((term) => term.toLowerCase()))).slice(0, 18);
-}
-
-function discoveryLanes(profile: Profile): DiscoveryLane[] {
-  const genre = profile.genre.trim() || "this genre";
-  const subgenre = profile.subgenre.trim() || "this subgenre";
-  const category = profile.category.trim() || "this category";
-  const expanded = genreExpansionTerms(profile).join(", ");
-  return [
-    { id: "broad", source: "public web search across literary agent profiles and directories", focus: `broad current ${category} ${genre} literary agents accepting ${subgenre}; include adjacent fit terms: ${expanded}` },
-    { id: "querytracker", source: "QueryTracker-style public search results and public query-status snippets", focus: `QueryTracker agents open to ${genre}, ${subgenre}, and adjacent subscriber-specific fit terms` },
-    { id: "querymanager", source: "QueryManager public submission pages and agency links", focus: `QueryManager submission forms for literary agents accepting ${genre}, ${subgenre}, or adjacent terms` },
-    { id: "mswl", source: "Manuscript Wish List and public agent wishlist/profile pages", focus: `Manuscript Wish List agents seeking ${genre}, ${subgenre}, and adjacent fit terms` },
-    { id: "agency", source: "agency websites, staff pages, and submission guidelines", focus: `agency submission pages naming agents open to ${genre}, ${subgenre}, and adjacent fit terms` },
-    { id: "newer-agents", source: "new agent announcements, agency staff pages, interviews, and public profiles", focus: `newer and associate literary agents building lists in ${genre}, ${subgenre}, or adjacent fit terms` },
-    { id: "boutique", source: "boutique and independent agency websites", focus: `independent agencies and boutique agencies accepting ${genre}, ${subgenre}, or adjacent fit terms` },
-    { id: "deep-directory", source: "deep public directory/profile search", focus: `deep directory pass for additional open ${genre}, ${subgenre}, and adjacent agents not already found` },
-    { id: "google", source: "Google Programmable Search source snippets", focus: `Google search pass for additional ${category} ${genre} literary agents accepting ${subgenre}; prioritize profile, guideline, and directory pages not already found` },
-    { id: "bing", source: "Bing Web Search source snippets", focus: `Bing search pass for additional ${category} ${genre} literary agents accepting ${subgenre}; prioritize profile, guideline, and directory pages not already found` },
-  ];
-}
-
-function mergeAgentPools(current: AgentRecord[], incoming: AgentRecord[]) {
-  const seen = new Set<string>();
-  return [...current, ...incoming].filter((agent) => {
-    const key = `${agent.agent_name}::${agent.agency}`.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function discoveryProgressText(total: number, lane: DiscoveryLane, diagnostics?: AgentSearchDiagnostics) {
-  const raw = diagnostics?.raw_count || 0;
-  const candidates = diagnostics?.candidate_count || 0;
-  const accepted = diagnostics?.verified_count || 0;
-  const snippets = diagnostics?.search_result_count || 0;
-  const providerError = diagnostics?.search_provider_errors?.[0];
-  if (diagnostics?.error) {
-    if (total > 0) {
-      return `${total} agents downloaded. ${lane.id} live expansion note: ${diagnostics.error}`;
-    }
-    return `${total} agents showing. ${lane.id} live discovery is blocked: ${diagnostics.error}`;
-  }
-  if (raw || candidates || accepted) {
-    const sourceText = snippets ? ` using ${snippets} search-engine leads` : "";
-    const providerText = !snippets && providerError ? ` Search provider note: ${providerError}` : "";
-    return `${total} agents showing. ${lane.id} found ${raw} raw${sourceText}, kept ${candidates}, added ${accepted}.${providerText} Continuing source checks...`;
-  }
-  return `${total} agents showing. ${lane.id} did not return usable names yet; checking the next source.`;
-}
 
 function countWords(value: string) {
   return value.trim().split(/\s+/).filter(Boolean).length;
@@ -421,8 +315,8 @@ function Home() {
       <section className="hero">
         <h1>Find agents. Send queries. Done in minutes.</h1>
         <p className="hero-copy">
-          Querying is a slog. An hour on a single agent - researching guidelines, status, and fit. Thats the old way. We do it differently.
-          We match every relevant agent to your genre and criteria in minutes - using a live, up-to-date list you can act on immediately.
+          Querying is a slog. An hour on a single agent - researching guidelines, status, and fit. That's the old way. Query Quick keeps that research running in the background,
+          then returns prepared open-agent matches the moment you search.
         </p>
         <div className="hero-actions">
           <button className="primary-button large" type="button" onClick={checkout}>Start Query Quick - $9.95/mo</button>
@@ -434,8 +328,8 @@ function Home() {
 
       <section className="value-strip" id="how" aria-label="Query Quick benefits">
         <div>Stop triangulating agent requirements the old way.</div>
-        <div>Keep all of your documents together in one location.</div>
-        <div>Accurately query several agents in minutes instead of hours.</div>
+        <div>Keep your submission materials organized locally in your workspace.</div>
+        <div>Move from open-agent match to submission action in minutes.</div>
       </section>
 
       <section className="pro-band">
@@ -460,7 +354,7 @@ function Home() {
       <footer className="public-footer">
         <p>
           Along with this amazing new tool, we recommend you having a Query Tracker subscription.
-          Together both tools ensure your success. Happy Querying!
+          Together both tools help keep your querying organized, current, and easier to act on.
         </p>
         <a href="https://circlethepeople.com" target="_blank" rel="noreferrer">
           Created by Circle the People - tools built for clarity, not noise.
@@ -683,7 +577,6 @@ function Workspace() {
   const [sentCount, setSentCount] = useState(() => Number(localStorage.getItem("query-quick.sent") || "0"));
   const [status, setStatus] = useState("Ready.");
   const [isSearching, setIsSearching] = useState(false);
-  const [intelLoadingKeys, setIntelLoadingKeys] = useState<string[]>([]);
   const [activityIndex, setActivityIndex] = useState(0);
   const [kitSaved, setKitSaved] = useState(() => localStorage.getItem("query-quick.kit-saved") === "true");
   const [intelAgent, setIntelAgent] = useState<AgentRecord | null>(null);
@@ -1008,95 +901,37 @@ ${profile.name || ""}`;
       return;
     }
     setIsSearching(true);
-    setStatus(agents.length
-      ? `Expanding from ${agents.length} saved agents toward ${targetAgentPoolSize}.`
-      : "Starting live agent discovery...");
-    const lanes = discoveryLanes(profile);
-    let downloaded: AgentRecord[] = agents;
-    let successfulPasses = 0;
-    let emptyLanes = 0;
-    let lastDiscoveryError = "";
+    setStatus("Loading prepared open-agent matches...");
     try {
-      for (const [index, lane] of lanes.entries()) {
-        setStatus(`Searching ${lane.id} lane ${index + 1}/${lanes.length}. ${downloaded.length} agents showing so far.`);
-        try {
-          const discovered = await api<{
-            agents: AgentRecord[];
-            cached?: boolean;
-            diagnostics?: AgentSearchDiagnostics;
-          }>("/api/agents/discover", {
-            method: "POST",
-            body: JSON.stringify({
-              ...profile,
-              discovery_lane: lane.id,
-              discovery_source: lane.source,
-              discovery_focus: lane.focus,
-              expanded_genres: genreExpansionTerms(profile),
-              include_stored_pool: index === 0 || downloaded.length < targetAgentPoolSize,
-              exclude_agents: downloaded.map((agent) => `${agent.agent_name} — ${agent.agency}`),
-            }),
-          }, session.token);
-          successfulPasses += 1;
-          if (discovered.diagnostics?.error) lastDiscoveryError = discovered.diagnostics.error;
-          const beforeCount = downloaded.length;
-          downloaded = mergeAgentPools(downloaded, discovered.agents);
-          emptyLanes = downloaded.length === beforeCount ? emptyLanes + 1 : 0;
-          setAgents(downloaded);
-          setStatus(discoveryProgressText(downloaded.length, lane, discovered.diagnostics));
-          if (downloaded.length >= targetAgentPoolSize) {
-            setStatus(`${downloaded.length} agents found. Target pool is ready; run Agent Intel two at a time.`);
-            break;
-          }
-          if (emptyLanes >= 4) setStatus(`${downloaded.length} agents showing. Still below ${targetAgentPoolSize}; checking deeper sources.`);
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : "One source did not respond";
-          setStatus(`${downloaded.length} agents showing. ${lane.id} needs another pass: ${reason}`);
-        }
+      const response = await api<{
+        agents: AgentRecord[];
+        instant?: boolean;
+        diagnostics?: AgentSearchDiagnostics & { background_refresh_queued?: boolean };
+      }>("/api/agents/search", {
+        method: "POST",
+        body: JSON.stringify(profile),
+      }, session.token);
+      const preparedAgents = response.agents || [];
+      setAgents(preparedAgents);
+      if (preparedAgents.length) {
+        setStatus(response.diagnostics?.background_refresh_queued
+          ? `${preparedAgents.length} open agents ready. Query Quick is refreshing this lane in the background.`
+          : `${preparedAgents.length} open agents ready.`);
+      } else {
+        setStatus("No prepared open agents are ready for this lane yet. Query Quick queued a background refresh.");
       }
-      setStatus(downloaded.length
-        ? `${downloaded.length} agents found. ${downloaded.length < targetAgentPoolSize ? "Search again to keep expanding the pool." : "Run Agent Intel two at a time when you are ready to prepare submissions."}`
-        : lastDiscoveryError
-          ? `Live discovery is blocked: ${lastDiscoveryError}`
-          : "No matching agents came back yet. Try again in a moment.");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Still checking live sources. Try again in a moment to pull in more agents.");
+      setStatus(error instanceof Error ? error.message : "Prepared agent search is unavailable right now.");
     } finally {
       setIsSearching(false);
     }
   }
 
   async function runAgentIntel(agent: AgentRecord) {
-    if (!session) return;
-    const key = agentKey(agent);
-    if (intelLoadingKeys.includes(key)) return;
-    if (intelLoadingKeys.length >= maxConcurrentIntel) {
-      setStatus("Run Agent Intel two at a time so the search stays accurate and responsive.");
-      return;
-    }
-    setIntelLoadingKeys((current) => current.includes(key) ? current : [...current, key].slice(0, maxConcurrentIntel));
-    setStatus(`Building Agent Intel for ${agent.agent_name}...`);
-    try {
-      const response = await api<{
-        agents: AgentRecord[];
-        cached?: boolean;
-        diagnostics?: { raw_count: number; candidate_count: number; verified_count: number };
-      }>("/api/agents/search", {
-        method: "POST",
-        body: JSON.stringify({ ...profile, candidates: [agent] }),
-      }, session.token);
-      const enriched = response.agents[0] || agent;
-      setAgents((current) => current.map((item) => (
-        item.agent_name === agent.agent_name && item.agency === agent.agency ? enriched : item
-      )));
-      setIntelAgent(enriched);
-      setStatus(agentReadyForSubmission(enriched)
-        ? `Agent Intel ready for ${enriched.agent_name}.`
-        : `Agent Intel updated for ${enriched.agent_name}. Review sources before sending.`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : `Could not build Agent Intel for ${agent.agent_name}.`);
-    } finally {
-      setIntelLoadingKeys((current) => current.filter((item) => item !== key));
-    }
+    setIntelAgent(agent);
+    setStatus(agentReadyForSubmission(agent)
+      ? `Prepared Agent Intel opened for ${agent.agent_name}.`
+      : `Agent Intel for ${agent.agent_name} is still being refreshed in the background.`);
   }
 
   function emailAgent(agent: AgentRecord) {
@@ -1263,8 +1098,7 @@ ${profile.name || ""}`;
             <p className="main-subheading">
               {activeView === "search" ? (
                 <>
-                  <strong>We’re doing the heavy lifting</strong>—checking multiple sources and matching agents to your criteria.{" "}
-                  <strong>It may take a minute or two.</strong> Feel free to grab a coffee—we’ll have results ready shortly.
+                  <strong>Search returns prepared open-agent intelligence instantly.</strong> Query Quick keeps discovery, verification, wishlist extraction, and ranking running in the background.
                 </>
               ) : activeView === "kit" ? (
                 "Build each submission item both ways: paste text for portal fields and upload the finished document when an agent asks for a file."
@@ -1279,8 +1113,8 @@ ${profile.name || ""}`;
             <div className="main-actions" aria-label="Agent search actions">
               <button className="primary-button action-button" type="button" disabled={isSearching} onClick={findAgents}>Find matching agents</button>
               <div className="agent-action-note">
-                <p>Find matching agents builds a working list from your book profile and current public submission sources.</p>
-                <p>Run Intel on an agent when you want Query Quick to prepare the exact submission route, required materials, and next action.</p>
+                <p>Find matching agents reads the refreshed Query Quick intelligence engine by genre, subgenre, and category.</p>
+                <p>Only prepared open-agent records are returned; deeper discovery keeps running after the result appears.</p>
               </div>
             </div>
           ) : null}
@@ -1429,16 +1263,13 @@ ${profile.name || ""}`;
             {sortedAgents.length ? (
               <>
                 <div className="research-note">
-                  <span>Agents are listed first. Run Intel when you want submission-ready details.</span>
-                  <strong>Agent Intel running: {intelLoadingKeys.length}/{maxConcurrentIntel}</strong>
+                  <span>Only currently open, prepared agent records are shown.</span>
+                  <strong>Background engine active</strong>
                 </div>
                 <div className="agent-list">
                   {sortedAgents.map((agent) => {
-                    const isIntelLoading = intelLoadingKeys.includes(agentKey(agent));
-                    const intelLimitReached = intelLoadingKeys.length >= maxConcurrentIntel && !isIntelLoading;
                     const needsIntel = agentNeedsIntel(agent);
-                    const intelBlocked = needsIntel && intelLimitReached;
-                    const intelState = isIntelLoading ? "running" : needsIntel ? "pending" : "ready";
+                    const intelState = needsIntel ? "pending" : "ready";
                     return (
                     <article className="agent-row" key={agentKey(agent)}>
                       <div className="agent-main">
@@ -1456,10 +1287,9 @@ ${profile.name || ""}`;
                           <button
                             className={`intel-pill intel-${intelState}`}
                             type="button"
-                            disabled={isIntelLoading || intelBlocked}
-                            onClick={() => needsIntel ? runAgentIntel(agent) : setIntelAgent(agent)}
+                            onClick={() => runAgentIntel(agent)}
                           >
-                            {isIntelLoading ? "Intel running" : needsIntel ? "Run Intel" : "Intel Ready"}
+                            {needsIntel ? "Updating" : "Intel Ready"}
                           </button>
                         </div>
                         {agent.fit_reason ? <p className="fit-reason">{agent.fit_reason}</p> : null}
@@ -1486,10 +1316,9 @@ ${profile.name || ""}`;
                         <button
                           className={`secondary-button intel-button intel-${intelState}`}
                           type="button"
-                          disabled={isIntelLoading || intelBlocked}
-                          onClick={() => needsIntel ? runAgentIntel(agent) : setIntelAgent(agent)}
+                          onClick={() => runAgentIntel(agent)}
                         >
-                          {isIntelLoading ? "Intel..." : intelLimitReached ? "Two running" : needsIntel ? "Run Intel" : "View Intel"}
+                          {needsIntel ? "View Updating Intel" : "View Intel"}
                         </button>
                         {agent.query_method === "email" && agent.public_email ? (
                           <button className="secondary-button" type="button" onClick={() => emailAgent(agent)}>Start Email</button>

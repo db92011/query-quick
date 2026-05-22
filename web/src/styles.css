@@ -204,7 +204,9 @@ a.secondary-button {
 }
 
 .hero h1 {
-  font-size: 56px;
+  max-width: 720px;
+  margin: 0 auto;
+  font-size: 48px;
   line-height: 1.05;
 }
 

@@ -1,14 +1,33 @@
 import { badRequest, json, textResponse } from "./lib/db";
 import { handleBilling } from "./routes/billing";
 import { handleQuickAuth } from "./routes/quick-auth";
-import { handleAgentDiscover, handleAgentIntelRefresh, handleAgentSearch, handleMarkSent, handleQuickFileUpload, handleQuickProfile, handleWaitlist } from "./routes/quick";
+import {
+  type AgentEngineQueueMessage,
+  handleAgentDiscover,
+  handleAgentEngineQueue,
+  handleAgentEngineScheduled,
+  handleAgentSearch,
+  handleMarkSent,
+  handleQuickFileUpload,
+  handleQuickProfile,
+  handleWaitlist,
+} from "./routes/quick";
 
 type Env = {
   DB: D1Database;
   FILES?: R2Bucket;
+  WISHLIST_INDEX?: Vectorize;
+  AGENT_DISCOVERY_QUEUE?: Queue<AgentEngineQueueMessage>;
+  AGENT_VERIFICATION_QUEUE?: Queue<AgentEngineQueueMessage>;
+  WISHLIST_EXTRACTION_QUEUE?: Queue<AgentEngineQueueMessage>;
+  GENRE_NORMALIZATION_QUEUE?: Queue<AgentEngineQueueMessage>;
+  RANKING_REFRESH_QUEUE?: Queue<AgentEngineQueueMessage>;
+  OPEN_STATUS_REFRESH_QUEUE?: Queue<AgentEngineQueueMessage>;
+  NOTIFICATION_CHECK_QUEUE?: Queue<AgentEngineQueueMessage>;
   APP_ORIGIN?: string;
   OPENAI_API_KEY?: string;
   OPENAI_MODEL?: string;
+  OPENAI_EMBEDDING_MODEL?: string;
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
   ANTHROPIC_API_KEY?: string;
@@ -60,7 +79,7 @@ function withCors(request: Request, response: Response, env: Env) {
 }
 
 export default {
-  async fetch(request: Request, env: Env) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     if (request.method === "OPTIONS") return withCors(request, new Response(null, { status: 204 }), env);
 
     try {
@@ -76,9 +95,9 @@ export default {
       } else if (url.pathname === "/api/waitlist") {
         response = await handleWaitlist(request, env);
       } else if (url.pathname === "/api/agents/search") {
-        response = await handleAgentSearch(request, env);
+        response = await handleAgentSearch(request, env, ctx);
       } else if (url.pathname === "/api/agents/discover") {
-        response = await handleAgentDiscover(request, env);
+        response = await handleAgentDiscover(request, env, ctx);
       } else if (url.pathname === "/api/profile") {
         response = await handleQuickProfile(request, env);
       } else if (url.pathname === "/api/submission-kit/file") {
@@ -95,7 +114,10 @@ export default {
       return withCors(request, badRequest(error instanceof Error ? error.message : "Unknown error.", 500), env);
     }
   },
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(handleAgentIntelRefresh(env));
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(handleAgentEngineScheduled(controller, env));
   },
-};
+  async queue(batch: MessageBatch<AgentEngineQueueMessage>, env: Env) {
+    await handleAgentEngineQueue(batch, env);
+  },
+} satisfies ExportedHandler<Env, AgentEngineQueueMessage>;

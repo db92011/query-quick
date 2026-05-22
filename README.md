@@ -36,13 +36,37 @@ and returns a local dev magic link when email delivery is not configured.
 
 ## Cloudflare Shape
 
-- Worker name: `query-quick-api`
+- Worker name: `query-quick-api` (the single Query Quick Agent Intelligence Engine surface)
 - D1 database: `query_quick`
 - R2 bucket: `query-quick-files`
 - API custom domain: `quick-api.querysalon.com`
 - Pages project: `query-quick`
 
 Do not deploy this through the old `query-salon-api` Worker. Do not reuse Query Salon storage for Query Quick user state.
+
+## Agent Intelligence Engine
+
+Query Quick is not a live scraper and the app shell must not make users wait on live research.
+
+The existing `query-quick-api` Worker owns the full background intelligence engine:
+
+- Cron decides which lanes need work.
+- Queues process discovery, verification, wishlist extraction, genre normalization, ranking, open-status refresh, and notifications.
+- D1 stores current operational truth and precomputed scores.
+- R2 stores short-lived source snapshots under `agent-engine/snapshots/`.
+- Vectorize stores wishlist embeddings for background semantic matching.
+
+The user search path is intentionally short:
+
+1. normalize the writer's genre/subgenre/category
+2. read prepared `OPEN` agent records from D1
+3. order by precomputed `final_rank_score`
+4. return up to 50 records immediately
+5. queue background refresh when coverage is thin
+
+OpenAI, Gemini, Claude, web search, source parsing, and Vectorize embedding writes are background-only. They run during ingestion, refresh, verification, wishlist extraction, and ranking work. They do not run during `/api/agents/search`.
+
+Validated source paths are treated as operational intelligence. When AALA, QueryManager, MSWL, agency pages, or other source paths produce usable open agents, they are promoted into `quick_validated_agent_paths` with genre lane, yield, priority, confidence, and next-check timing. Cron uses those validated paths before wandering into lower-yield research.
 
 ## Agent Discovery Frame
 

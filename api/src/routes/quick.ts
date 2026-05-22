@@ -1,11 +1,20 @@
 import { requireSession } from "../lib/auth";
-import { all, badRequest, json, run } from "../lib/db";
+import { all, badRequest, json, one, run } from "../lib/db";
 
 type Env = {
   DB: D1Database;
   FILES?: R2Bucket;
+  WISHLIST_INDEX?: Vectorize;
+  AGENT_DISCOVERY_QUEUE?: Queue<AgentEngineQueueMessage>;
+  AGENT_VERIFICATION_QUEUE?: Queue<AgentEngineQueueMessage>;
+  WISHLIST_EXTRACTION_QUEUE?: Queue<AgentEngineQueueMessage>;
+  GENRE_NORMALIZATION_QUEUE?: Queue<AgentEngineQueueMessage>;
+  RANKING_REFRESH_QUEUE?: Queue<AgentEngineQueueMessage>;
+  OPEN_STATUS_REFRESH_QUEUE?: Queue<AgentEngineQueueMessage>;
+  NOTIFICATION_CHECK_QUEUE?: Queue<AgentEngineQueueMessage>;
   OPENAI_API_KEY?: string;
   OPENAI_MODEL?: string;
+  OPENAI_EMBEDDING_MODEL?: string;
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
   ANTHROPIC_API_KEY?: string;
@@ -14,6 +23,31 @@ type Env = {
   GOOGLE_SEARCH_CX?: string;
   BING_SEARCH_API_KEY?: string;
   BING_SEARCH_ENDPOINT?: string;
+};
+
+export type AgentEngineJobType =
+  | "agent-discovery"
+  | "agent-verification"
+  | "wishlist-extraction"
+  | "genre-normalization"
+  | "ranking-refresh"
+  | "open-status-refresh"
+  | "notification-check";
+
+export type AgentEngineQueueMessage = {
+  job_id?: string;
+  job_type: AgentEngineJobType;
+  agent_id?: string;
+  source_url?: string;
+  genre?: string;
+  subgenre?: string;
+  category?: string;
+  tone?: string;
+  audience?: string;
+  reason?: string;
+  priority?: number;
+  created_at?: string;
+  payload?: Record<string, unknown>;
 };
 
 type AgentRecord = {
@@ -129,6 +163,18 @@ const SEARCH_PROVIDER_TIMEOUT_MS = 12000;
 const STORED_POOL_DISCOVERY_BUDGET_MS = 18000;
 const EMPTY_POOL_DISCOVERY_BUDGET_MS = 70000;
 const SEARCH_RESULTS_PER_PROVIDER = 8;
+const INSTANT_SEARCH_LIMIT = 50;
+const SNAPSHOT_RETENTION_DAYS = 14;
+
+const queueNames: Record<AgentEngineJobType, string> = {
+  "agent-discovery": "agent-discovery",
+  "agent-verification": "agent-verification",
+  "wishlist-extraction": "wishlist-extraction",
+  "genre-normalization": "genre-normalization",
+  "ranking-refresh": "ranking-refresh",
+  "open-status-refresh": "open-status-refresh",
+  "notification-check": "notification-check",
+};
 
 const coreDiscoverySources = [
   "AALA member directory and AALA agent profile pages with public subject-focus and submissions status",
@@ -173,6 +219,37 @@ const allowedFileKinds = new Set([
 
 function clean(value: unknown) {
   return String(value || "").trim();
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function clampScore(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function queueBindingForJob(env: Env, jobType: AgentEngineJobType) {
+  const bindings: Record<AgentEngineJobType, Queue<AgentEngineQueueMessage> | undefined> = {
+    "agent-discovery": env.AGENT_DISCOVERY_QUEUE,
+    "agent-verification": env.AGENT_VERIFICATION_QUEUE,
+    "wishlist-extraction": env.WISHLIST_EXTRACTION_QUEUE,
+    "genre-normalization": env.GENRE_NORMALIZATION_QUEUE,
+    "ranking-refresh": env.RANKING_REFRESH_QUEUE,
+    "open-status-refresh": env.OPEN_STATUS_REFRESH_QUEUE,
+    "notification-check": env.NOTIFICATION_CHECK_QUEUE,
+  };
+  return bindings[jobType];
+}
+
+function canonicalJobPayload(message: AgentEngineQueueMessage) {
+  return {
+    ...message,
+    created_at: message.created_at || nowIso(),
+    priority: Number(message.priority || 50),
+    payload: message.payload || {},
+  };
 }
 
 function cacheKey(body: Record<string, unknown>) {
@@ -1743,6 +1820,284 @@ async function recordAgentStatusCheck(
   );
 }
 
+function sourceTypeFromUrl(value: string) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.replace(/^www\./, "").toLowerCase();
+    if (host.includes("querymanager")) return "querymanager";
+    if (host.includes("querytracker")) return "querytracker";
+    if (host.includes("manuscriptwishlist")) return "mswl";
+    if (host.includes("aalitagents")) return "aala";
+    if (host.includes("literaryagencies")) return "literaryagencies";
+    if (host.includes("thewordling")) return "wordling";
+    if (host.includes("1000literaryagents")) return "1000literaryagents";
+    if (host.includes("regionaldirectory")) return "regionaldirectory";
+    if (host.includes("agency") || host.includes("literary") || host.includes("lit")) return "agency";
+    return "public-web";
+  } catch {
+    return "public-web";
+  }
+}
+
+function pathKeyFromUrl(value: string) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.replace(/^www\./, "").toLowerCase();
+    const parts = url.pathname.split("/").filter(Boolean).slice(0, 3);
+    return [host, ...parts].join("/");
+  } catch {
+    return normalizeSearchText(value).slice(0, 140) || "unknown-path";
+  }
+}
+
+async function promoteValidatedAgentPaths(env: Env, agentId: string, body: Record<string, unknown>, agent: AgentRecord, now: string) {
+  const genre = clean(agent.matched_genre) || clean(body.genre) || clean(agent.genre_fit);
+  const subgenre = clean(agent.matched_subgenre) || clean(body.subgenre);
+  const normalizedGenre = normalizeSearchText(genre);
+  const normalizedSubgenre = normalizeSearchText(subgenre);
+  const sourceUrls = Array.from(new Set([
+    agent.source_url,
+    submissionRouteUrl(agent),
+    ...(agent.source_urls || []),
+  ].map(clean).filter(validUrl)));
+
+  for (const sourceUrl of sourceUrls) {
+    const sourceType = sourceTypeFromUrl(sourceUrl);
+    const pathKey = pathKeyFromUrl(sourceUrl);
+    const confidence = clampScore(Number(agent.confidence_score || 0) + (agent.submission_route_verified ? 10 : 0));
+    const priority = clampScore(confidence + (agent.open_status === "open" ? 10 : 0));
+    try {
+      await run(
+        env.DB,
+        `INSERT INTO quick_validated_agent_paths (
+           id, source_type, path_key, source_url, genre_lane, normalized_genre,
+           normalized_subgenre, status, priority, useful_agent_count, open_agent_yield,
+           false_positive_count, last_agent_id, last_useful_at, next_check_at,
+           confidence_score, notes, created_at, updated_at
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'watching', ?8, 1, ?9, 0, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+         ON CONFLICT(path_key, normalized_genre, normalized_subgenre) DO UPDATE SET
+           source_url = excluded.source_url,
+           status = 'watching',
+           priority = max(priority, excluded.priority),
+           useful_agent_count = useful_agent_count + 1,
+           open_agent_yield = open_agent_yield + excluded.open_agent_yield,
+           last_agent_id = excluded.last_agent_id,
+           last_useful_at = excluded.last_useful_at,
+           next_check_at = excluded.next_check_at,
+           confidence_score = max(confidence_score, excluded.confidence_score),
+           notes = excluded.notes,
+           updated_at = excluded.updated_at`,
+        [
+          crypto.randomUUID(),
+          sourceType,
+          pathKey,
+          sourceUrl,
+          [genre, subgenre].filter(Boolean).join(" / "),
+          normalizedGenre,
+          normalizedSubgenre,
+          priority,
+          agent.open_status === "open" ? 1 : 0,
+          agentId,
+          now,
+          new Date(Date.now() + 1000 * 60 * 60 * (sourceType === "querymanager" || sourceType === "aala" ? 12 : 24)).toISOString(),
+          confidence,
+          `${sourceType} path produced ${agent.agent_name} for ${genre || "this genre"}.`,
+          now,
+          now,
+        ]
+      );
+    } catch {
+      // Older local databases may not have the operational path table until migrations run.
+    }
+  }
+}
+
+async function refreshAgentScore(env: Env, agentId: string) {
+  try {
+    const row = await one<{
+      id: string;
+      open_status: string;
+      confidence_score: number;
+      last_verified: string;
+      submission_route_verified: number;
+      requirements_summary: string;
+      required_materials_json: string;
+      wishlist_summary: string;
+      genre_confidence: number;
+    }>(
+      env.DB,
+      `SELECT qa.id,
+              qa.open_status,
+              qa.confidence_score,
+              qa.last_verified,
+              qa.submission_route_verified,
+              COALESCE(qr.requirements_summary, qa.requirements_summary) AS requirements_summary,
+              COALESCE(qr.required_materials_json, qa.required_materials_json) AS required_materials_json,
+              COALESCE(qr.wishlist_summary, '') AS wishlist_summary,
+              COALESCE(max(qag.confidence_score), qa.confidence_score) AS genre_confidence
+       FROM quick_agents qa
+       LEFT JOIN quick_agent_requirements qr ON qr.agent_id = qa.id
+       LEFT JOIN quick_agent_genres qag ON qag.agent_id = qa.id AND qag.active = 1
+       WHERE qa.id = ?1
+       GROUP BY qa.id`,
+      [agentId]
+    );
+    if (!row) return;
+    const verifiedTime = Date.parse(row.last_verified || "");
+    const ageDays = Number.isFinite(verifiedTime) ? Math.max(0, (Date.now() - verifiedTime) / (1000 * 60 * 60 * 24)) : 30;
+    const materials = safeJsonArray(row.required_materials_json, []);
+    const summary = clean(row.requirements_summary);
+    const wishlist = clean(row.wishlist_summary);
+    const openScore = row.open_status === "open" ? 100 : row.open_status === "selective" ? 45 : 0;
+    const genreFitScore = clampScore(Number(row.genre_confidence || row.confidence_score || 0));
+    const wishlistFitScore = clampScore((wishlist ? 70 : 35) + Math.min(25, wishlist.length / 80));
+    const freshnessScore = clampScore(100 - ageDays * 6);
+    const confidenceScore = clampScore(Number(row.confidence_score || 0));
+    const submissionReadyScore = clampScore(
+      (row.submission_route_verified ? 45 : 0) +
+      (summary && !summary.toLowerCase().includes("building agent intel") ? 35 : 0) +
+      (materials.length ? 20 : 0)
+    );
+    const finalRankScore = clampScore(
+      openScore * 0.26 +
+      genreFitScore * 0.22 +
+      wishlistFitScore * 0.18 +
+      freshnessScore * 0.14 +
+      confidenceScore * 0.1 +
+      submissionReadyScore * 0.1
+    );
+    await run(
+      env.DB,
+      `INSERT INTO quick_agent_scores (
+         agent_id, open_score, genre_fit_score, wishlist_fit_score, freshness_score,
+         confidence_score, submission_ready_score, final_rank_score, score_reason, updated_at
+       )
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+       ON CONFLICT(agent_id) DO UPDATE SET
+         open_score = excluded.open_score,
+         genre_fit_score = excluded.genre_fit_score,
+         wishlist_fit_score = excluded.wishlist_fit_score,
+         freshness_score = excluded.freshness_score,
+         confidence_score = excluded.confidence_score,
+         submission_ready_score = excluded.submission_ready_score,
+         final_rank_score = excluded.final_rank_score,
+         score_reason = excluded.score_reason,
+         updated_at = excluded.updated_at`,
+      [
+        agentId,
+        openScore,
+        genreFitScore,
+        wishlistFitScore,
+        freshnessScore,
+        confidenceScore,
+        submissionReadyScore,
+        finalRankScore,
+        `open ${openScore}; genre ${genreFitScore}; wishlist ${wishlistFitScore}; freshness ${freshnessScore}; ready ${submissionReadyScore}`,
+        nowIso(),
+      ]
+    );
+  } catch {
+    // Ranking is supportive. A failed score refresh should not block ingestion or search.
+  }
+}
+
+async function saveAgentToMaster(env: Env, body: Record<string, unknown>, agent: AgentRecord, now: string) {
+  const normalizedKey = normalizedAgentKey(agent);
+  const agentId = `agent_${normalizedKey}`;
+  await run(
+    env.DB,
+    `INSERT INTO quick_agents (
+       id, normalized_key, agent_name, agency, genre_fit, query_method, submission_url, public_email,
+       requirements_summary, email_opener, open_status, source_url, last_verified, confidence_score, first_seen_at, last_seen_at,
+       matched_genre, matched_subgenre, genre_evidence, subgenre_evidence, fit_reason, required_materials_json,
+       source_urls_json, verification_notes, submission_route_verified, submission_route_verified_at,
+       submission_route_status, submission_route_notes, refresh_status, refresh_error, next_refresh_at
+     )
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+       ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31)
+     ON CONFLICT(normalized_key) DO UPDATE SET
+       agent_name = excluded.agent_name,
+       agency = excluded.agency,
+       genre_fit = excluded.genre_fit,
+       query_method = excluded.query_method,
+       submission_url = excluded.submission_url,
+       public_email = excluded.public_email,
+       requirements_summary = excluded.requirements_summary,
+       email_opener = excluded.email_opener,
+       open_status = excluded.open_status,
+       source_url = excluded.source_url,
+       last_verified = excluded.last_verified,
+       confidence_score = excluded.confidence_score,
+       last_seen_at = excluded.last_seen_at,
+       matched_genre = excluded.matched_genre,
+       matched_subgenre = excluded.matched_subgenre,
+       genre_evidence = excluded.genre_evidence,
+       subgenre_evidence = excluded.subgenre_evidence,
+       fit_reason = excluded.fit_reason,
+       required_materials_json = excluded.required_materials_json,
+       source_urls_json = excluded.source_urls_json,
+       verification_notes = excluded.verification_notes,
+       submission_route_verified = excluded.submission_route_verified,
+       submission_route_verified_at = excluded.submission_route_verified_at,
+       submission_route_status = excluded.submission_route_status,
+       submission_route_notes = excluded.submission_route_notes,
+       refresh_status = excluded.refresh_status,
+       refresh_error = excluded.refresh_error,
+       next_refresh_at = excluded.next_refresh_at`,
+    [
+      agentId,
+      normalizedKey,
+      agent.agent_name,
+      agent.agency,
+      agent.genre_fit,
+      agent.query_method,
+      agent.submission_url || "",
+      agent.public_email || "",
+      agent.requirements_summary,
+      agent.email_opener || "",
+      agent.open_status,
+      agent.source_url,
+      agent.last_verified,
+      Number(agent.confidence_score || 0),
+      now,
+      now,
+      agent.matched_genre || agent.genre_fit,
+      agent.matched_subgenre || clean(body.subgenre),
+      agent.genre_evidence || "",
+      agent.subgenre_evidence || "",
+      agent.fit_reason || "",
+      JSON.stringify(agent.required_materials || ["query_letter"]),
+      JSON.stringify(agent.source_urls || [agent.source_url]),
+      agent.verification_notes || "",
+      agent.submission_route_verified ? 1 : 0,
+      agent.submission_route_verified_at || "",
+      Number(agent.submission_route_status || 0),
+      agent.submission_route_notes || "",
+      agentNeedsIntel(agent) ? "candidate" : "fresh",
+      "",
+      new Date(Date.now() + 1000 * 60 * (agentNeedsIntel(agent) ? 30 : 60 * 6)).toISOString(),
+    ]
+  );
+
+  await saveAgentMasterFacets(env, agentId, body, agent, now);
+  if (agent.submission_route_verified_at || agent.submission_route_status) {
+    await recordAgentStatusCheck(
+      env,
+      agentId,
+      submissionRouteUrl(agent),
+      agent.open_status,
+      Boolean(agent.submission_route_verified),
+      Number(agent.submission_route_status || 0),
+      agent.submission_route_notes || agent.verification_notes || "",
+      agent.submission_route_verified_at || now
+    );
+  }
+  await promoteValidatedAgentPaths(env, agentId, body, agent, now);
+  await refreshAgentScore(env, agentId);
+  return { agentId, normalizedKey };
+}
+
 async function saveAgentResearch(
   env: Env,
   userId: string,
@@ -1761,95 +2116,7 @@ async function saveAgentResearch(
 
   for (let index = 0; index < agents.length; index += 1) {
     const agent = agents[index];
-    const normalizedKey = normalizedAgentKey(agent);
-    const agentId = `agent_${normalizedKey}`;
-    await run(
-      env.DB,
-      `INSERT INTO quick_agents (
-         id, normalized_key, agent_name, agency, genre_fit, query_method, submission_url, public_email,
-         requirements_summary, email_opener, open_status, source_url, last_verified, confidence_score, first_seen_at, last_seen_at,
-         matched_genre, matched_subgenre, genre_evidence, subgenre_evidence, fit_reason, required_materials_json,
-         source_urls_json, verification_notes, submission_route_verified, submission_route_verified_at,
-         submission_route_status, submission_route_notes, refresh_status, refresh_error, next_refresh_at
-       )
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-         ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31)
-       ON CONFLICT(normalized_key) DO UPDATE SET
-         agent_name = excluded.agent_name,
-         agency = excluded.agency,
-         genre_fit = excluded.genre_fit,
-         query_method = excluded.query_method,
-         submission_url = excluded.submission_url,
-         public_email = excluded.public_email,
-         requirements_summary = excluded.requirements_summary,
-         email_opener = excluded.email_opener,
-         open_status = excluded.open_status,
-         source_url = excluded.source_url,
-         last_verified = excluded.last_verified,
-         confidence_score = excluded.confidence_score,
-         last_seen_at = excluded.last_seen_at,
-         matched_genre = excluded.matched_genre,
-         matched_subgenre = excluded.matched_subgenre,
-         genre_evidence = excluded.genre_evidence,
-         subgenre_evidence = excluded.subgenre_evidence,
-         fit_reason = excluded.fit_reason,
-         required_materials_json = excluded.required_materials_json,
-         source_urls_json = excluded.source_urls_json,
-         verification_notes = excluded.verification_notes,
-         submission_route_verified = excluded.submission_route_verified,
-         submission_route_verified_at = excluded.submission_route_verified_at,
-         submission_route_status = excluded.submission_route_status,
-         submission_route_notes = excluded.submission_route_notes,
-         refresh_status = excluded.refresh_status,
-         refresh_error = excluded.refresh_error,
-         next_refresh_at = excluded.next_refresh_at`,
-      [
-        agentId,
-        normalizedKey,
-        agent.agent_name,
-        agent.agency,
-        agent.genre_fit,
-        agent.query_method,
-        agent.submission_url || "",
-        agent.public_email || "",
-        agent.requirements_summary,
-        agent.email_opener || "",
-        agent.open_status,
-        agent.source_url,
-        agent.last_verified,
-        Number(agent.confidence_score || 0),
-        now,
-        now,
-        agent.matched_genre || agent.genre_fit,
-        agent.matched_subgenre || clean(body.subgenre),
-        agent.genre_evidence || "",
-        agent.subgenre_evidence || "",
-        agent.fit_reason || "",
-        JSON.stringify(agent.required_materials || ["query_letter"]),
-        JSON.stringify(agent.source_urls || [agent.source_url]),
-        agent.verification_notes || "",
-        agent.submission_route_verified ? 1 : 0,
-        agent.submission_route_verified_at || "",
-        Number(agent.submission_route_status || 0),
-        agent.submission_route_notes || "",
-        agentNeedsIntel(agent) ? "candidate" : "fresh",
-        "",
-        new Date(Date.now() + 1000 * 60 * (agentNeedsIntel(agent) ? 30 : 60 * 6)).toISOString(),
-      ]
-    );
-    await saveAgentMasterFacets(env, agentId, body, agent, now);
-    if (agent.submission_route_verified_at || agent.submission_route_status) {
-      await recordAgentStatusCheck(
-        env,
-        agentId,
-        submissionRouteUrl(agent),
-        agent.open_status,
-        Boolean(agent.submission_route_verified),
-        Number(agent.submission_route_status || 0),
-        agent.submission_route_notes || agent.verification_notes || "",
-        agent.submission_route_verified_at || now
-      );
-    }
+    const { normalizedKey } = await saveAgentToMaster(env, body, agent, now);
     await run(
       env.DB,
       `INSERT OR IGNORE INTO quick_agent_search_results (search_id, agent_id, rank, created_at)
@@ -2035,6 +2302,124 @@ async function storedOpenAgentPoolFromLegacyFields(env: Env, body: Record<string
   return rows.map(rowToIntelAgent);
 }
 
+function instantSearchTerms(body: Record<string, unknown>) {
+  const terms = [
+    ...storedPoolTerms(body),
+    clean(body.tone),
+    clean(body.audience),
+  ];
+  return Array.from(new Set(terms.map(normalizeSearchText).filter(Boolean))).slice(0, 18);
+}
+
+function agentIsPreparedForInstantSearch(agent: AgentRecord) {
+  if (agent.open_status !== "open") return false;
+  if (agentNeedsIntel(agent)) return false;
+  if (agent.query_method === "email") return validEmail(agent.public_email);
+  return validUrl(agent.submission_url || agent.source_url);
+}
+
+async function instantOpenAgentSearch(env: Env, body: Record<string, unknown>) {
+  const terms = instantSearchTerms(body);
+  if (!terms.length) return [];
+  const fields = [
+    "qag.normalized_genre",
+    "qag.normalized_subgenre",
+    "lower(qag.genre_evidence)",
+    "lower(qag.subgenre_evidence)",
+    "lower(qag.fit_reason)",
+    "lower(qa.genre_fit)",
+    "lower(COALESCE(qr.wishlist_summary, ''))",
+    "lower(COALESCE(qr.requirements_summary, qa.requirements_summary))",
+  ];
+  const maxTerms = Math.max(1, Math.floor(88 / fields.length));
+  const params: string[] = [];
+  const termClauses = terms.slice(0, maxTerms).map((term) => {
+    const fieldClauses = fields.map((field) => {
+      params.push(`%${term}%`);
+      return `${field} LIKE ?${params.length}`;
+    });
+    return `(${fieldClauses.join(" OR ")})`;
+  });
+  params.push(String(INSTANT_SEARCH_LIMIT));
+  try {
+    const rows = await all<Parameters<typeof rowToIntelAgent>[0] & { final_rank_score: number }>(
+      env.DB,
+      `SELECT qa.agent_name,
+              qa.agency,
+              qa.genre_fit,
+              COALESCE(NULLIF(qag.genre, ''), qa.matched_genre) AS matched_genre,
+              COALESCE(NULLIF(qag.subgenre, ''), qa.matched_subgenre) AS matched_subgenre,
+              COALESCE(NULLIF(qag.genre_evidence, ''), qa.genre_evidence) AS genre_evidence,
+              COALESCE(NULLIF(qag.subgenre_evidence, ''), qa.subgenre_evidence) AS subgenre_evidence,
+              COALESCE(NULLIF(qag.fit_reason, ''), qa.fit_reason) AS fit_reason,
+              COALESCE(qr.query_method, qa.query_method) AS query_method,
+              COALESCE(qr.submission_url, qa.submission_url) AS submission_url,
+              COALESCE(qr.public_email, qa.public_email) AS public_email,
+              COALESCE(qr.requirements_summary, qa.requirements_summary) AS requirements_summary,
+              COALESCE(qr.email_opener, qa.email_opener) AS email_opener,
+              qa.open_status,
+              COALESCE(qr.source_url, qa.source_url) AS source_url,
+              COALESCE(qr.source_urls_json, qa.source_urls_json) AS source_urls_json,
+              COALESCE(qr.verification_notes, qa.verification_notes) AS verification_notes,
+              COALESCE(qr.required_materials_json, qa.required_materials_json) AS required_materials_json,
+              COALESCE(qr.wishlist_summary, '') AS wishlist_summary,
+              COALESCE(qr.submission_requirements_json, '{}') AS submission_requirements_json,
+              qa.submission_route_verified,
+              qa.submission_route_verified_at,
+              qa.submission_route_status,
+              qa.submission_route_notes,
+              qa.last_verified,
+              qa.confidence_score,
+              COALESCE(qs.final_rank_score, qa.confidence_score) AS final_rank_score
+       FROM quick_agent_genres qag
+       JOIN quick_agents qa ON qa.id = qag.agent_id
+       LEFT JOIN quick_agent_requirements qr ON qr.agent_id = qa.id
+       LEFT JOIN quick_agent_scores qs ON qs.agent_id = qa.id
+       WHERE qa.open_status = 'open'
+         AND qag.active = 1
+         AND COALESCE(qr.requirements_summary, qa.requirements_summary) != ''
+         AND lower(COALESCE(qr.requirements_summary, qa.requirements_summary)) NOT LIKE '%building agent intel%'
+         AND (${termClauses.join(" OR ")})
+       ORDER BY
+         COALESCE(qs.final_rank_score, qa.confidence_score) DESC,
+         qa.submission_route_verified DESC,
+         qa.confidence_score DESC,
+         qag.last_seen_at DESC
+       LIMIT ?${params.length}`,
+      params
+    );
+    return rows.map(rowToIntelAgent).filter(agentIsPreparedForInstantSearch);
+  } catch {
+    const fallback = await storedOpenAgentPool(env, body);
+    return fallback.filter(agentIsPreparedForInstantSearch).slice(0, INSTANT_SEARCH_LIMIT);
+  }
+}
+
+async function recordInstantAgentSearch(
+  env: Env,
+  userId: string,
+  key: string,
+  body: Record<string, unknown>,
+  agents: AgentRecord[]
+) {
+  const now = nowIso();
+  const searchId = crypto.randomUUID();
+  await run(
+    env.DB,
+    `INSERT INTO quick_agent_searches (id, user_id, cache_key, genre, subgenre, category, result_count, created_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+    [searchId, userId, key, clean(body.genre), clean(body.subgenre), clean(body.category), agents.length, now]
+  );
+  for (let index = 0; index < agents.length; index += 1) {
+    await run(
+      env.DB,
+      `INSERT OR IGNORE INTO quick_agent_search_results (search_id, agent_id, rank, created_at)
+       VALUES (?1, (SELECT id FROM quick_agents WHERE normalized_key = ?2), ?3, ?4)`,
+      [searchId, normalizedAgentKey(agents[index]), index + 1, now]
+    );
+  }
+}
+
 export async function handleAgentIntelRefresh(env: Env) {
   const rows = await all<{
     id: string;
@@ -2139,76 +2524,733 @@ export async function handleWaitlist(request: Request, env: Env) {
   return json({ ok: true });
 }
 
-export async function handleAgentSearch(request: Request, env: Env) {
-  if (request.method !== "POST") return badRequest("Method not allowed.", 405);
-  const session = await requireSession(request, env);
-  const body = await request.json() as Record<string, unknown>;
-  if (!clean(body.genre) || !clean(body.category)) return badRequest("Genre and category are required.");
-
-  const key = cacheKey(body);
-  const seenKeys = await userSeenAgentKeys(env, session.user.id);
-  const sourceCandidates = sourceCandidateList(body);
-  if (!sourceCandidates.length) return badRequest("At least one downloaded agent candidate is required for Agent Intel.", 400);
-  const generated = await generateAgents(env, { ...body, candidates: sourceCandidates.slice(0, ENRICHMENT_BATCH_SIZE) });
-  const agents = markSeenBefore(dedupeAgents(generated.agents), seenKeys);
-  if (!agents.length) {
-    await saveAgentResearch(env, session.user.id, key, body, agents);
-    return json({ ok: true, cached: false, agents, diagnostics: generated.diagnostics });
-  }
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + 1000 * 60 * 60 * 24 * 7).toISOString();
-  await run(
-    env.DB,
-    `INSERT OR REPLACE INTO quick_agent_cache (cache_key, genre, subgenre, category, agents_json, created_at, expires_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
-    [key, clean(body.genre), clean(body.subgenre), clean(body.category), JSON.stringify(agents), now.toISOString(), expiresAt]
-  );
-  await saveAgentResearch(env, session.user.id, key, body, agents);
-  return json({ ok: true, cached: false, agents, diagnostics: generated.diagnostics });
-}
-
-export async function handleAgentDiscover(request: Request, env: Env) {
-  if (request.method !== "POST") return badRequest("Method not allowed.", 405);
-  const session = await requireSession(request, env);
-  const body = await request.json() as Record<string, unknown>;
-  if (!clean(body.genre) || !clean(body.category)) return badRequest("Genre and category are required.");
-
-  const key = cacheKey(body);
-  const seenKeys = await userSeenAgentKeys(env, session.user.id);
-  const storedAgents = body.include_stored_pool === false ? [] : await storedOpenAgentPool(env, body);
-  const discoveryBudgetMs = storedAgents.length ? STORED_POOL_DISCOVERY_BUDGET_MS : EMPTY_POOL_DISCOVERY_BUDGET_MS;
-  let liveDiscovered: { agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics };
-  try {
-    liveDiscovered = await generateLiveCandidatePoolForResponse(env, body, discoveryBudgetMs);
-  } catch (error) {
-    liveDiscovered = {
-      agents: [],
-      diagnostics: {
-        raw_count: 0,
-        candidate_count: 0,
-        verified_count: 0,
-        discovery_passes: 0,
-        source_lanes: clean(body.discovery_lane),
-        source: "live_discovery_failed",
-        error: await errorMessage(error, "Live discovery failed before returning candidates."),
-      },
+async function requestAgentSearchBody(request: Request) {
+  if (request.method === "GET") {
+    const url = new URL(request.url);
+    return {
+      genre: url.searchParams.get("genre") || "",
+      subgenre: url.searchParams.get("subgenre") || "",
+      category: url.searchParams.get("category") || url.searchParams.get("audience") || "adult fiction",
+      tone: url.searchParams.get("tone") || "",
+      audience: url.searchParams.get("audience") || "",
     };
   }
-  const discovered: { agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics } = {
-    agents: dedupeAgents([...storedAgents, ...liveDiscovered.agents]),
+  return await request.json() as Record<string, unknown>;
+}
+
+async function enqueueAgentEngineJob(env: Env, message: AgentEngineQueueMessage) {
+  const job = canonicalJobPayload(message);
+  const jobId = job.job_id || crypto.randomUUID();
+  const queueName = queueNames[job.job_type];
+  const queuedMessage = { ...job, job_id: jobId };
+  try {
+    await run(
+      env.DB,
+      `INSERT INTO quick_agent_engine_jobs (
+         id, queue_name, job_type, status, priority, agent_id, source_url,
+         genre, subgenre, reason, payload_json, scheduled_for, created_at
+       )
+       VALUES (?1, ?2, ?3, 'queued', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+       ON CONFLICT(id) DO UPDATE SET
+         status = 'queued',
+         priority = excluded.priority,
+         scheduled_for = excluded.scheduled_for,
+         payload_json = excluded.payload_json`,
+      [
+        jobId,
+        queueName,
+        job.job_type,
+        Number(job.priority || 50),
+        clean(job.agent_id),
+        clean(job.source_url),
+        clean(job.genre),
+        clean(job.subgenre),
+        clean(job.reason),
+        JSON.stringify(job.payload || {}),
+        "",
+        job.created_at || nowIso(),
+      ]
+    );
+  } catch {
+    // The ledger appears after the operational migration; queue dispatch can still proceed.
+  }
+  const queue = queueBindingForJob(env, job.job_type);
+  if (queue) await queue.send(queuedMessage);
+}
+
+async function enqueueSearchMaintenance(env: Env, body: Record<string, unknown>, resultCount: number) {
+  const genre = clean(body.genre);
+  const subgenre = clean(body.subgenre);
+  const category = clean(body.category) || "adult fiction";
+  const priority = resultCount < 10 ? 92 : resultCount < 25 ? 72 : 45;
+  if (resultCount < 25) {
+    await enqueueAgentEngineJob(env, {
+      job_type: "agent-discovery",
+      genre,
+      subgenre,
+      category,
+      tone: clean(body.tone),
+      audience: clean(body.audience),
+      priority,
+      reason: resultCount ? "search-low-coverage" : "search-empty-lane",
+      payload: {
+        include_stored_pool: false,
+        expanded_genres: genreExpansionTerms(body),
+      },
+    });
+  }
+  await enqueueAgentEngineJob(env, {
+    job_type: "ranking-refresh",
+    genre,
+    subgenre,
+    category,
+    priority: 40,
+    reason: "post-search-rank-maintenance",
+  });
+}
+
+export async function handleAgentSearch(request: Request, env: Env, ctx?: ExecutionContext) {
+  if (request.method !== "POST" && request.method !== "GET") return badRequest("Method not allowed.", 405);
+  const session = await requireSession(request, env);
+  const body = await requestAgentSearchBody(request);
+  if (!clean(body.genre) || !clean(body.category)) return badRequest("Genre and category are required.");
+
+  const key = cacheKey(body);
+  const seenKeys = await userSeenAgentKeys(env, session.user.id);
+  const agents = markSeenBefore(dedupeAgents(await instantOpenAgentSearch(env, body)), seenKeys);
+  await recordInstantAgentSearch(env, session.user.id, key, body, agents);
+  const maintenance = enqueueSearchMaintenance(env, body, agents.length);
+  if (ctx) {
+    ctx.waitUntil(maintenance);
+  } else {
+    await maintenance;
+  }
+  return json({
+    ok: true,
+    cached: false,
+    instant: true,
+    agents,
     diagnostics: {
-      ...liveDiscovered.diagnostics,
-      verified_count: dedupeAgents([...storedAgents, ...liveDiscovered.agents]).length,
-      source: storedAgents.length ? "stored_plus_live_pool" : "live_full_pool",
+      raw_count: agents.length,
+      candidate_count: agents.length,
+      verified_count: agents.length,
+      source: "precomputed_d1",
+      background_refresh_queued: agents.length < 25,
     },
+  });
+}
+
+export async function handleAgentDiscover(request: Request, env: Env, ctx?: ExecutionContext) {
+  if (request.method !== "POST") return badRequest("Method not allowed.", 405);
+  const session = await requireSession(request, env);
+  const body = await request.json() as Record<string, unknown>;
+  if (!clean(body.genre) || !clean(body.category)) return badRequest("Genre and category are required.");
+
+  const key = cacheKey(body);
+  const seenKeys = await userSeenAgentKeys(env, session.user.id);
+  const agents = markSeenBefore(dedupeAgents(await instantOpenAgentSearch(env, body)), seenKeys);
+  await recordInstantAgentSearch(env, session.user.id, key, body, agents);
+  const discovery = enqueueAgentEngineJob(env, {
+    job_type: "agent-discovery",
+    genre: clean(body.genre),
+    subgenre: clean(body.subgenre),
+    category: clean(body.category),
+    tone: clean(body.tone),
+    audience: clean(body.audience),
+    reason: clean(body.discovery_focus) || "manual-background-discovery",
+    priority: Number(body.priority || 75),
+    payload: {
+      discovery_lane: clean(body.discovery_lane),
+      discovery_source: clean(body.discovery_source),
+      discovery_focus: clean(body.discovery_focus),
+      expanded_genres: Array.isArray(body.expanded_genres) ? body.expanded_genres : genreExpansionTerms(body),
+      include_stored_pool: false,
+      exclude_agents: Array.isArray(body.exclude_agents) ? body.exclude_agents : [],
+    },
+  });
+  if (ctx) {
+    ctx.waitUntil(discovery);
+  } else {
+    await discovery;
+  }
+  return json({
+    ok: true,
+    cached: false,
+    instant: true,
+    agents,
+    diagnostics: {
+      raw_count: agents.length,
+      candidate_count: agents.length,
+      verified_count: agents.length,
+      source: "precomputed_d1_background_discovery_queued",
+    },
+  });
+}
+
+async function markEngineJob(env: Env, jobId: string | undefined, status: string, patch: Record<string, unknown> = {}) {
+  if (!jobId) return;
+  const now = nowIso();
+  try {
+    if (status === "processing") {
+      await run(
+        env.DB,
+        `UPDATE quick_agent_engine_jobs
+         SET status = 'processing', attempts = attempts + 1, started_at = ?1, last_error = ''
+         WHERE id = ?2`,
+        [now, jobId]
+      );
+      return;
+    }
+    if (status === "failed") {
+      await run(
+        env.DB,
+        `UPDATE quick_agent_engine_jobs
+         SET status = 'failed', last_error = ?1, finished_at = ?2
+         WHERE id = ?3`,
+        [clean(patch.error).slice(0, 500), now, jobId]
+      );
+      return;
+    }
+    await run(
+      env.DB,
+      `UPDATE quick_agent_engine_jobs
+       SET status = ?1, finished_at = ?2, last_error = ''
+       WHERE id = ?3`,
+      [status, now, jobId]
+    );
+  } catch {
+    // Job ledger writes are useful for operations but should not poison queue retries.
+  }
+}
+
+async function loadAgentById(env: Env, agentId: string) {
+  if (!agentId) return null;
+  const row = await one<Parameters<typeof rowToIntelAgent>[0]>(
+    env.DB,
+    `SELECT qa.agent_name,
+            qa.agency,
+            qa.genre_fit,
+            qa.matched_genre,
+            qa.matched_subgenre,
+            qa.genre_evidence,
+            qa.subgenre_evidence,
+            qa.fit_reason,
+            COALESCE(qr.query_method, qa.query_method) AS query_method,
+            COALESCE(qr.submission_url, qa.submission_url) AS submission_url,
+            COALESCE(qr.public_email, qa.public_email) AS public_email,
+            COALESCE(qr.requirements_summary, qa.requirements_summary) AS requirements_summary,
+            COALESCE(qr.email_opener, qa.email_opener) AS email_opener,
+            qa.open_status,
+            COALESCE(qr.source_url, qa.source_url) AS source_url,
+            COALESCE(qr.source_urls_json, qa.source_urls_json) AS source_urls_json,
+            COALESCE(qr.verification_notes, qa.verification_notes) AS verification_notes,
+            COALESCE(qr.required_materials_json, qa.required_materials_json) AS required_materials_json,
+            COALESCE(qr.wishlist_summary, '') AS wishlist_summary,
+            COALESCE(qr.submission_requirements_json, '{}') AS submission_requirements_json,
+            qa.submission_route_verified,
+            qa.submission_route_verified_at,
+            qa.submission_route_status,
+            qa.submission_route_notes,
+            qa.last_verified,
+            qa.confidence_score
+     FROM quick_agents qa
+     LEFT JOIN quick_agent_requirements qr ON qr.agent_id = qa.id
+     WHERE qa.id = ?1`,
+    [agentId]
+  );
+  return row ? rowToIntelAgent(row) : null;
+}
+
+function bodyFromQueueMessage(message: AgentEngineQueueMessage) {
+  return {
+    genre: clean(message.genre || message.payload?.genre),
+    subgenre: clean(message.subgenre || message.payload?.subgenre),
+    category: clean(message.category || message.payload?.category) || "adult fiction",
+    tone: clean(message.tone || message.payload?.tone),
+    audience: clean(message.audience || message.payload?.audience),
+    discovery_lane: clean(message.payload?.discovery_lane),
+    discovery_source: clean(message.payload?.discovery_source || message.source_url),
+    discovery_focus: clean(message.payload?.discovery_focus || message.reason),
+    expanded_genres: Array.isArray(message.payload?.expanded_genres) ? message.payload?.expanded_genres : undefined,
+    exclude_agents: Array.isArray(message.payload?.exclude_agents) ? message.payload?.exclude_agents : [],
+    include_stored_pool: false,
   };
-  const agents = markSeenBefore(dedupeAgents(discovered.agents), seenKeys).map((agent) => ({
-    ...agent,
-    intel_pending: true,
-    seen_before: agent.seen_before,
-  }));
-  await saveAgentResearch(env, session.user.id, key, body, agents);
-  return json({ ok: true, cached: false, agents, diagnostics: discovered.diagnostics });
+}
+
+async function hashText(value: string) {
+  const buffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(buffer)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function captureAgentSnapshots(env: Env, agentId: string, agent: AgentRecord) {
+  if (!env.FILES) return;
+  const urls = Array.from(new Set([
+    agent.source_url,
+    submissionRouteUrl(agent),
+    ...(agent.source_urls || []),
+  ].map(clean).filter(validUrl))).slice(0, 4);
+  for (const sourceUrl of urls) {
+    const text = await fetchSourceSnippet(sourceUrl);
+    if (!text) continue;
+    const hash = await hashText(text);
+    const id = crypto.randomUUID();
+    const created = nowIso();
+    const expiresAt = new Date(Date.now() + SNAPSHOT_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const key = `agent-engine/snapshots/${created.slice(0, 10)}/${agentId}/${id}.txt`;
+    await env.FILES.put(key, text, {
+      httpMetadata: { contentType: "text/plain; charset=utf-8" },
+      customMetadata: { source_url: sourceUrl, agent_id: agentId, expires_at: expiresAt },
+    });
+    try {
+      await run(
+        env.DB,
+        `INSERT INTO quick_agent_snapshots (
+           id, agent_id, source_url, r2_key, snapshot_kind, content_hash, expires_at, created_at
+         )
+         VALUES (?1, ?2, ?3, ?4, 'source-text', ?5, ?6, ?7)`,
+        [id, agentId, sourceUrl, key, hash, expiresAt, created]
+      );
+    } catch {
+      // Snapshot object retention can still be governed by R2 lifecycle while the ledger migrates.
+    }
+  }
+}
+
+async function openAiEmbedding(env: Env, text: string) {
+  if (!env.OPENAI_API_KEY || !text.trim()) return null;
+  const response = await fetch("https://api.openai.com/v1/embeddings", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: clean(env.OPENAI_EMBEDDING_MODEL) || "text-embedding-3-small",
+      input: text.slice(0, 6000),
+    }),
+  });
+  const data = await response.json() as { data?: Array<{ embedding?: number[] }>; error?: { message?: string } };
+  if (!response.ok) throw new Error(data.error?.message || "Embedding generation failed.");
+  return data.data?.[0]?.embedding || null;
+}
+
+async function upsertWishlistVector(env: Env, agentId: string, agent: AgentRecord) {
+  if (!env.WISHLIST_INDEX || !env.OPENAI_API_KEY) return;
+  const text = wishlistSummaryForAgent(agent);
+  if (!text) return;
+  const embedding = await openAiEmbedding(env, text);
+  if (!embedding) return;
+  const contentHash = await hashText(text);
+  await env.WISHLIST_INDEX.upsert([{
+    id: agentId,
+    values: embedding,
+    namespace: "wishlist",
+    metadata: {
+      agent_id: agentId,
+      agent_name: agent.agent_name,
+      agency: agent.agency,
+      genre: normalizeSearchText(agent.matched_genre || agent.genre_fit),
+      subgenre: normalizeSearchText(agent.matched_subgenre || ""),
+      open_status: agent.open_status,
+    },
+  }]);
+  try {
+    await run(
+      env.DB,
+      `INSERT INTO quick_agent_vectors (
+         agent_id, vector_id, namespace, content_hash, embedded_at, updated_at
+       )
+       VALUES (?1, ?2, 'wishlist', ?3, ?4, ?5)
+       ON CONFLICT(agent_id) DO UPDATE SET
+         vector_id = excluded.vector_id,
+         content_hash = excluded.content_hash,
+         embedded_at = excluded.embedded_at,
+         updated_at = excluded.updated_at`,
+      [agentId, agentId, contentHash, nowIso(), nowIso()]
+    );
+  } catch {
+    // Vectorize remains usable even when the D1 vector ledger is still migrating.
+  }
+}
+
+async function processAgentDiscoveryJob(env: Env, message: AgentEngineQueueMessage) {
+  const body = bodyFromQueueMessage(message);
+  const result = await generateLiveCandidatePoolForResponse(env, body, EMPTY_POOL_DISCOVERY_BUDGET_MS);
+  const now = nowIso();
+  for (const agent of result.agents) {
+    const saved = await saveAgentToMaster(env, body, agent, now);
+    await enqueueAgentEngineJob(env, {
+      job_type: agentNeedsIntel(agent) ? "wishlist-extraction" : "ranking-refresh",
+      agent_id: saved.agentId,
+      genre: clean(body.genre),
+      subgenre: clean(body.subgenre),
+      category: clean(body.category),
+      priority: agentNeedsIntel(agent) ? 76 : 55,
+      reason: "discovery-result",
+    });
+    await enqueueAgentEngineJob(env, {
+      job_type: "genre-normalization",
+      agent_id: saved.agentId,
+      genre: clean(body.genre),
+      subgenre: clean(body.subgenre),
+      category: clean(body.category),
+      priority: 50,
+      reason: "discovery-genre-fit",
+    });
+  }
+}
+
+async function processOneAgentVerification(env: Env, agentId: string) {
+  const agent = await loadAgentById(env, agentId);
+  if (!agent) return;
+  const result = await verifySubmissionRouteResult(agent);
+  const now = nowIso();
+  await run(
+    env.DB,
+    `UPDATE quick_agents
+     SET open_status = ?1,
+         last_verified = ?2,
+         submission_route_verified = ?3,
+         submission_route_verified_at = ?4,
+         submission_route_status = ?5,
+         submission_route_notes = ?6,
+         refresh_status = ?7,
+         refresh_error = ?8,
+         next_refresh_at = ?9
+     WHERE id = ?10`,
+    [
+      result.closed ? "closed" : result.agent ? "open" : agent.open_status,
+      result.agent ? now : agent.last_verified,
+      result.agent ? 1 : 0,
+      result.agent?.submission_route_verified_at || agent.submission_route_verified_at || "",
+      result.status,
+      result.agent?.submission_route_notes || result.notes,
+      result.agent ? "fresh" : result.closed ? "closed" : "needs_review",
+      result.agent ? "" : result.notes,
+      new Date(Date.now() + (result.agent ? 6 : 1) * 60 * 60 * 1000).toISOString(),
+      agentId,
+    ]
+  );
+  await recordAgentStatusCheck(
+    env,
+    agentId,
+    submissionRouteUrl(agent),
+    result.closed ? "closed" : result.agent ? "open" : agent.open_status,
+    Boolean(result.agent),
+    result.status,
+    result.agent?.submission_route_notes || result.notes,
+    now
+  );
+  await refreshAgentScore(env, agentId);
+  if (result.agent) {
+    await enqueueAgentEngineJob(env, {
+      job_type: "notification-check",
+      agent_id: agentId,
+      genre: result.agent.matched_genre || result.agent.genre_fit,
+      subgenre: result.agent.matched_subgenre || "",
+      priority: 60,
+      reason: "status-open",
+    });
+  }
+}
+
+async function processWishlistExtractionJob(env: Env, message: AgentEngineQueueMessage) {
+  const agentId = clean(message.agent_id);
+  const agent = await loadAgentById(env, agentId);
+  if (!agent) return;
+  const body = {
+    genre: clean(message.genre) || agent.matched_genre || agent.genre_fit,
+    subgenre: clean(message.subgenre) || agent.matched_subgenre,
+    category: clean(message.category) || "adult fiction",
+    candidates: [agent],
+  };
+  const enriched = await generateAgents(env, body);
+  const next = enriched.agents[0] || agent;
+  await saveAgentToMaster(env, body, next, nowIso());
+  await captureAgentSnapshots(env, agentId, next);
+  await upsertWishlistVector(env, agentId, next);
+}
+
+async function processGenreNormalizationJob(env: Env, message: AgentEngineQueueMessage) {
+  const agent = clean(message.agent_id) ? await loadAgentById(env, clean(message.agent_id)) : null;
+  const genre = clean(message.genre) || agent?.matched_genre || agent?.genre_fit || "";
+  const subgenre = clean(message.subgenre) || agent?.matched_subgenre || "";
+  const category = clean(message.category) || "adult fiction";
+  const aliases = Array.from(new Set([
+    genre,
+    subgenre,
+    ...(agent ? [agent.genre_fit, agent.matched_genre, agent.matched_subgenre] : []),
+  ].map(clean).filter(Boolean)));
+  const now = nowIso();
+  for (const alias of aliases) {
+    await run(
+      env.DB,
+      `INSERT INTO quick_genre_aliases (
+         id, alias, normalized_alias, canonical_genre, canonical_subgenre,
+         audience, confidence_score, source, active, created_at, updated_at
+       )
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, 70, 'engine', 1, ?7, ?8)
+       ON CONFLICT(alias) DO UPDATE SET
+         normalized_alias = excluded.normalized_alias,
+         canonical_genre = excluded.canonical_genre,
+         canonical_subgenre = excluded.canonical_subgenre,
+         audience = excluded.audience,
+         confidence_score = max(confidence_score, excluded.confidence_score),
+         active = 1,
+         updated_at = excluded.updated_at`,
+      [crypto.randomUUID(), alias, normalizeSearchText(alias), genre, subgenre, category, now, now]
+    );
+  }
+}
+
+async function processRankingRefreshJob(env: Env, message: AgentEngineQueueMessage) {
+  const agentId = clean(message.agent_id);
+  if (agentId) {
+    await refreshAgentScore(env, agentId);
+    return;
+  }
+  const rows = await all<{ id: string }>(
+    env.DB,
+    `SELECT qa.id
+     FROM quick_agents qa
+     LEFT JOIN quick_agent_scores qs ON qs.agent_id = qa.id
+     WHERE qa.open_status = 'open'
+       AND (qs.updated_at IS NULL OR datetime(qs.updated_at) <= datetime('now', '-6 hours'))
+     ORDER BY qa.confidence_score DESC, qa.last_seen_at DESC
+     LIMIT 100`
+  );
+  for (const row of rows) await refreshAgentScore(env, row.id);
+}
+
+async function processNotificationCheckJob(env: Env, message: AgentEngineQueueMessage) {
+  const agentId = clean(message.agent_id);
+  if (!agentId) return;
+  const agent = await loadAgentById(env, agentId);
+  if (!agent || agent.open_status !== "open") return;
+  const genre = normalizeSearchText(agent.matched_genre || agent.genre_fit);
+  const subgenre = normalizeSearchText(agent.matched_subgenre || "");
+  const watches = await all<{ id: string }>(
+    env.DB,
+    `SELECT id
+     FROM quick_notification_watches
+     WHERE active = 1
+       AND normalized_genre = ?1
+       AND (normalized_subgenre = '' OR normalized_subgenre = ?2)
+     LIMIT 100`,
+    [genre, subgenre]
+  );
+  for (const watch of watches) {
+    await run(
+      env.DB,
+      `INSERT INTO quick_agent_notifications (
+         id, watch_id, agent_id, notification_type, message, created_at, sent_at
+       )
+       SELECT ?1, ?2, ?3, 'agent-opened', ?4, ?5, ''
+       WHERE NOT EXISTS (
+         SELECT 1 FROM quick_agent_notifications
+         WHERE watch_id = ?2 AND agent_id = ?3 AND notification_type = 'agent-opened'
+       )`,
+      [
+        crypto.randomUUID(),
+        watch.id,
+        agentId,
+        `${agent.agent_name} at ${agent.agency} is open for ${agent.matched_genre || agent.genre_fit}.`,
+        nowIso(),
+      ]
+    );
+  }
+}
+
+async function processAgentEngineMessage(env: Env, message: AgentEngineQueueMessage) {
+  switch (message.job_type) {
+    case "agent-discovery":
+      await processAgentDiscoveryJob(env, message);
+      return;
+    case "agent-verification":
+    case "open-status-refresh":
+      if (clean(message.agent_id)) {
+        await processOneAgentVerification(env, clean(message.agent_id));
+      } else {
+        await handleAgentIntelRefresh(env);
+      }
+      return;
+    case "wishlist-extraction":
+      await processWishlistExtractionJob(env, message);
+      return;
+    case "genre-normalization":
+      await processGenreNormalizationJob(env, message);
+      return;
+    case "ranking-refresh":
+      await processRankingRefreshJob(env, message);
+      return;
+    case "notification-check":
+      await processNotificationCheckJob(env, message);
+      return;
+  }
+}
+
+export async function handleAgentEngineQueue(batch: MessageBatch<AgentEngineQueueMessage>, env: Env) {
+  for (const message of batch.messages) {
+    try {
+      await markEngineJob(env, message.body.job_id, "processing");
+      await processAgentEngineMessage(env, message.body);
+      await markEngineJob(env, message.body.job_id, "done");
+      message.ack();
+    } catch (error) {
+      await markEngineJob(env, message.body.job_id, "failed", {
+        error: error instanceof Error ? error.message : "Queue job failed.",
+      });
+      message.retry({ delaySeconds: Math.min(3600, 60 * Math.max(1, message.attempts)) });
+    }
+  }
+}
+
+async function enqueueDueOpenStatusJobs(env: Env, reason: string, limit: number) {
+  const rows = await all<{ id: string; matched_genre: string; matched_subgenre: string; genre_fit: string }>(
+    env.DB,
+    `SELECT id, matched_genre, matched_subgenre, genre_fit
+     FROM quick_agents
+     WHERE open_status IN ('open', 'selective')
+       AND (next_refresh_at = '' OR datetime(next_refresh_at) <= datetime('now'))
+     ORDER BY
+       CASE WHEN open_status = 'open' THEN 0 ELSE 1 END,
+       datetime(next_refresh_at) ASC,
+       confidence_score DESC
+     LIMIT ?1`,
+    [limit]
+  );
+  for (const row of rows) {
+    await enqueueAgentEngineJob(env, {
+      job_type: "open-status-refresh",
+      agent_id: row.id,
+      genre: row.matched_genre || row.genre_fit,
+      subgenre: row.matched_subgenre || "",
+      reason,
+      priority: 80,
+    });
+  }
+}
+
+async function enqueueMediumConfidenceJobs(env: Env) {
+  const rows = await all<{ id: string; matched_genre: string; matched_subgenre: string; genre_fit: string }>(
+    env.DB,
+    `SELECT id, matched_genre, matched_subgenre, genre_fit
+     FROM quick_agents
+     WHERE open_status IN ('open', 'selective')
+       AND (confidence_score BETWEEN 35 AND 74 OR refresh_status IN ('candidate', 'needs_review'))
+     ORDER BY confidence_score ASC, last_seen_at DESC
+     LIMIT 50`
+  );
+  for (const row of rows) {
+    await enqueueAgentEngineJob(env, {
+      job_type: "wishlist-extraction",
+      agent_id: row.id,
+      genre: row.matched_genre || row.genre_fit,
+      subgenre: row.matched_subgenre || "",
+      reason: "medium-confidence-refresh",
+      priority: 70,
+    });
+  }
+}
+
+async function enqueueValidatedPathDiscoveryJobs(env: Env, reason: string, limit: number) {
+  const rows = await all<{
+    source_url: string;
+    normalized_genre: string;
+    normalized_subgenre: string;
+    genre_lane: string;
+    priority: number;
+  }>(
+    env.DB,
+    `SELECT source_url, normalized_genre, normalized_subgenre, genre_lane, priority
+     FROM quick_validated_agent_paths
+     WHERE status = 'watching'
+       AND (next_check_at = '' OR datetime(next_check_at) <= datetime('now'))
+     ORDER BY priority DESC, open_agent_yield DESC, updated_at DESC
+     LIMIT ?1`,
+    [limit]
+  );
+  for (const row of rows) {
+    await enqueueAgentEngineJob(env, {
+      job_type: "agent-discovery",
+      genre: row.normalized_genre,
+      subgenre: row.normalized_subgenre,
+      source_url: row.source_url,
+      reason,
+      priority: Math.max(60, Number(row.priority || 50)),
+      payload: {
+        discovery_source: row.source_url,
+        discovery_focus: row.genre_lane || `validated source path for ${row.normalized_genre}`,
+      },
+    });
+  }
+}
+
+async function enqueueLowCoverageDiscoveryJobs(env: Env) {
+  const rows = await all<{ genre: string; subgenre: string; category: string; result_count: number }>(
+    env.DB,
+    `SELECT genre, subgenre, category, min(result_count) AS result_count
+     FROM quick_agent_searches
+     WHERE datetime(created_at) >= datetime('now', '-7 days')
+     GROUP BY genre, subgenre, category
+     HAVING min(result_count) < 15
+     ORDER BY min(result_count) ASC, max(created_at) DESC
+     LIMIT 20`
+  );
+  for (const row of rows) {
+    await enqueueAgentEngineJob(env, {
+      job_type: "agent-discovery",
+      genre: row.genre,
+      subgenre: row.subgenre,
+      category: row.category,
+      reason: "recent-search-low-coverage",
+      priority: row.result_count < 5 ? 90 : 72,
+    });
+  }
+}
+
+async function cleanupExpiredSnapshots(env: Env) {
+  if (!env.FILES) return;
+  const rows = await all<{ id: string; r2_key: string }>(
+    env.DB,
+    `SELECT id, r2_key
+     FROM quick_agent_snapshots
+     WHERE datetime(expires_at) <= datetime('now')
+     ORDER BY expires_at ASC
+     LIMIT 100`
+  );
+  for (const row of rows) {
+    await env.FILES.delete(row.r2_key);
+    await run(env.DB, `DELETE FROM quick_agent_snapshots WHERE id = ?1`, [row.id]);
+  }
+}
+
+export async function handleAgentEngineScheduled(controller: ScheduledController, env: Env) {
+  const cron = controller.cron;
+  if (cron === "0 * * * *") {
+    await enqueueDueOpenStatusJobs(env, "hourly-open-status", 80);
+    await cleanupExpiredSnapshots(env);
+    return;
+  }
+  if (cron === "17 */6 * * *") {
+    await enqueueMediumConfidenceJobs(env);
+    await enqueueDueOpenStatusJobs(env, "six-hour-medium-confidence", 40);
+    return;
+  }
+  if (cron === "30 8 * * *") {
+    await enqueueLowCoverageDiscoveryJobs(env);
+    await enqueueValidatedPathDiscoveryJobs(env, "daily-validated-path-refresh", 30);
+    return;
+  }
+  if (cron === "45 8 * * *") {
+    await enqueueAgentEngineJob(env, { job_type: "ranking-refresh", reason: "daily-ranking-recompute", priority: 65 });
+    await enqueueDueOpenStatusJobs(env, "daily-stale-agent-sweep", 120);
+    return;
+  }
+  if (cron === "0 9 * * 1") {
+    await enqueueValidatedPathDiscoveryJobs(env, "weekly-full-source-verification", 100);
+    await enqueueDueOpenStatusJobs(env, "weekly-full-status-verification", 200);
+  }
 }
 
 export async function handleQuickProfile(request: Request, env: Env) {

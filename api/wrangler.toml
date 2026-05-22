@@ -1,11 +1,21 @@
 name = "query-quick-api"
 main = "src/index.ts"
-compatibility_date = "2026-04-26"
+compatibility_date = "2026-05-01"
 workers_dev = false
 preview_urls = false
 
 [triggers]
-crons = ["*/30 * * * *"]
+crons = [
+  "0 * * * *",
+  "17 */6 * * *",
+  "30 8 * * *",
+  "45 8 * * *",
+  "0 9 * * 1"
+]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
 
 [[d1_databases]]
 binding = "DB"
@@ -16,6 +26,87 @@ database_id = "74d2f67e-7fb8-4d50-949b-91ee25d6d0f6"
 binding = "FILES"
 bucket_name = "query-quick-files"
 preview_bucket_name = "query-quick-files-preview"
+
+[[vectorize]]
+binding = "WISHLIST_INDEX"
+index_name = "queryquick-wishlist"
+
+[[queues.producers]]
+binding = "AGENT_DISCOVERY_QUEUE"
+queue = "agent-discovery"
+
+[[queues.producers]]
+binding = "AGENT_VERIFICATION_QUEUE"
+queue = "agent-verification"
+
+[[queues.producers]]
+binding = "WISHLIST_EXTRACTION_QUEUE"
+queue = "wishlist-extraction"
+
+[[queues.producers]]
+binding = "GENRE_NORMALIZATION_QUEUE"
+queue = "genre-normalization"
+
+[[queues.producers]]
+binding = "RANKING_REFRESH_QUEUE"
+queue = "ranking-refresh"
+
+[[queues.producers]]
+binding = "OPEN_STATUS_REFRESH_QUEUE"
+queue = "open-status-refresh"
+
+[[queues.producers]]
+binding = "NOTIFICATION_CHECK_QUEUE"
+queue = "notification-check"
+
+[[queues.consumers]]
+queue = "agent-discovery"
+max_batch_size = 3
+max_batch_timeout = 10
+max_retries = 4
+max_concurrency = 2
+
+[[queues.consumers]]
+queue = "agent-verification"
+max_batch_size = 8
+max_batch_timeout = 10
+max_retries = 4
+max_concurrency = 4
+
+[[queues.consumers]]
+queue = "wishlist-extraction"
+max_batch_size = 4
+max_batch_timeout = 10
+max_retries = 3
+max_concurrency = 2
+
+[[queues.consumers]]
+queue = "genre-normalization"
+max_batch_size = 10
+max_batch_timeout = 10
+max_retries = 3
+max_concurrency = 3
+
+[[queues.consumers]]
+queue = "ranking-refresh"
+max_batch_size = 10
+max_batch_timeout = 10
+max_retries = 3
+max_concurrency = 4
+
+[[queues.consumers]]
+queue = "open-status-refresh"
+max_batch_size = 10
+max_batch_timeout = 10
+max_retries = 4
+max_concurrency = 4
+
+[[queues.consumers]]
+queue = "notification-check"
+max_batch_size = 10
+max_batch_timeout = 10
+max_retries = 3
+max_concurrency = 2
 
 [vars]
 APP_ORIGIN = "https://querysalon.com"

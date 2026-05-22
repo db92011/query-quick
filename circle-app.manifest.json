@@ -1,0 +1,181 @@
+{
+  "schema": "circle-app-manifest/v1",
+  "id": "query-quick",
+  "name": "Query Quick",
+  "status": "active-build",
+  "audience": "writers preparing literary-agent submissions",
+  "purpose": "Give writers instant, current open-agent matches from a continuously refreshed querying intelligence engine.",
+  "canonicalRuntime": "web-pwa",
+  "repo": {
+    "path": "/Users/dannybrooking/Documents/GitHub = master copy/query-quick",
+    "sourceOfTruth": "github"
+  },
+  "local": {
+    "devCommand": "npm run dev",
+    "port": 4174,
+    "marketingUrl": "http://localhost:4174/",
+    "installUrl": "http://localhost:4174/",
+    "appUrl": "http://localhost:4174/quick"
+  },
+  "production": {
+    "marketingUrl": "https://circlethepeople.com/query-quick/",
+    "installUrl": "https://querysalon.com/",
+    "runtimeUrl": "https://querysalon.com/quick",
+    "apiUrl": "https://quick-api.querysalon.com",
+    "deployment": "cloudflare-pages-git"
+  },
+  "pwa": {
+    "manifestPath": "CircleThePeopleSite/query-quick/site.webmanifest",
+    "serviceWorkerPath": "CircleThePeopleSite/query-quick/sw.js",
+    "expectedStartUrl": "/query-quick/",
+    "scope": "/query-quick/",
+    "installShell": "/query-quick/",
+    "iconPaths": [
+      "CircleThePeopleSite/query-quick/icons/icon-192.png",
+      "CircleThePeopleSite/query-quick/icons/icon-512.png",
+      "CircleThePeopleSite/query-quick/icons/icon-1024.png"
+    ],
+    "cacheStrategy": "marketing-install-shell"
+  },
+  "uiContract": {
+    "designSystem": "circle-standard",
+    "buttonSet": "circle-standard",
+    "modalSet": "circle-standard",
+    "installModal": "circle-pwa-install",
+    "marketingLayout": "circle-app-marketing-v1",
+    "allowedOverrides": [
+      "brandColor",
+      "appIcon",
+      "heroMedia",
+      "screenshots",
+      "productCopy",
+      "featureControls"
+    ]
+  },
+  "marketingSurface": {
+    "ownedSitePath": "/query-quick/",
+    "headline": "Query Quick",
+    "category": "writer tool",
+    "shortPitch": "A querying intelligence engine that returns open literary agents instantly from refreshed operational research.",
+    "primaryAudience": "writers with a submission kit who need current open-agent matches",
+    "canonicalAction": "install_pwa",
+    "runtimeHandoff": "https://querysalon.com/quick"
+  },
+  "seo": {
+    "title": "Query Quick | Circle the People",
+    "description": "Query Quick helps writers find currently open literary agents from a continuously refreshed querying intelligence engine.",
+    "canonicalUrl": "https://circlethepeople.com/query-quick/",
+    "schemaTypes": [
+      "SoftwareApplication",
+      "WebApplication"
+    ],
+    "sitemap": true,
+    "indexNow": true,
+    "openGraph": true,
+    "twitterCard": true
+  },
+  "llmExposure": {
+    "enabled": true,
+    "publicSummary": true,
+    "markdownTwin": true,
+    "jsonTwin": true,
+    "llmsTxt": true,
+    "aiIntake": true,
+    "recommendationMap": true,
+    "citationTargets": [
+      "https://circlethepeople.com/query-quick/",
+      "https://circlethepeople.com/ai/query-quick-summary.json"
+    ],
+    "approvedCrawlerSurfaces": [
+      "https://circlethepeople.com/query-quick/",
+      "https://circlethepeople.com/ai/query-quick-summary.json"
+    ]
+  },
+  "aiSays": {
+    "enabled": true,
+    "showOnMarketingPage": true,
+    "ownedSitePlacement": [
+      "/query-quick/",
+      "/ai/query-quick-summary.json"
+    ],
+    "providers": [
+      "ChatGPT",
+      "Claude",
+      "Gemini",
+      "Perplexity",
+      "Copilot"
+    ],
+    "testedPrompts": [],
+    "showLastChecked": true,
+    "showCitationStatus": true,
+    "showRecommendationStatus": true,
+    "publicRules": {
+      "noPrivatePrompts": true,
+      "noCredentials": true,
+      "noRawTokens": true,
+      "noFakeEndorsements": true,
+      "showTimestamp": true,
+      "labelAsObservedSnapshot": true
+    }
+  },
+  "lucySocial": {
+    "enabled": true,
+    "postable": true,
+    "defaultPostTypes": [
+      "launch",
+      "feature",
+      "proof",
+      "use_case",
+      "update"
+    ],
+    "brandVoice": "useful, warm, direct, not hypey",
+    "approvedClaims": [
+      "Query Quick returns precomputed open-agent intelligence instead of making writers wait on live research.",
+      "Query Quick stores writer materials locally in the app shell and keeps backend storage focused on agent intelligence."
+    ],
+    "blockedClaims": [
+      "guaranteed representation",
+      "official endorsement by agents",
+      "private database access"
+    ]
+  },
+  "verification": {
+    "firTargets": [
+      "query-quick-api",
+      "query-quick-web",
+      "circlethepeople.com/query-quick/"
+    ],
+    "screenGenieFlows": [
+      "query-quick install surface",
+      "query-quick app search surface"
+    ],
+    "voltmeterProfiles": [
+      "query-quick-api",
+      "query-quick-web"
+    ],
+    "localTargets": [
+      "http://127.0.0.1:4174/",
+      "http://127.0.0.1:4174/quick",
+      "http://127.0.0.1:8789/api/health"
+    ],
+    "deployedTargets": [
+      "https://querysalon.com/quick",
+      "https://quick-api.querysalon.com/api/health",
+      "https://circlethepeople.com/query-quick/"
+    ],
+    "airRequiredWhenInstallChanges": true
+  },
+  "secrets": {
+    "usesKeyMaster": true,
+    "genericAdminSecretAllowed": false,
+    "expectedWorkerSecrets": [
+      "OPENAI_API_KEY",
+      "GEMINI_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "RESEND_API_KEY",
+      "RESEND_FROM_EMAIL",
+      "STRIPE_SECRET_KEY",
+      "STRIPE_PRICE_ID"
+    ]
+  }
+}
