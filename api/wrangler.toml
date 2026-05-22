@@ -31,6 +31,9 @@ preview_bucket_name = "query-quick-files-preview"
 binding = "WISHLIST_INDEX"
 index_name = "queryquick-wishlist"
 
+[ai]
+binding = "AI"
+
 [[queues.producers]]
 binding = "AGENT_DISCOVERY_QUEUE"
 queue = "agent-discovery"

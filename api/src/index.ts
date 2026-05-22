@@ -17,6 +17,7 @@ type Env = {
   DB: D1Database;
   FILES?: R2Bucket;
   WISHLIST_INDEX?: Vectorize;
+  AI?: Ai;
   AGENT_DISCOVERY_QUEUE?: Queue<AgentEngineQueueMessage>;
   AGENT_VERIFICATION_QUEUE?: Queue<AgentEngineQueueMessage>;
   WISHLIST_EXTRACTION_QUEUE?: Queue<AgentEngineQueueMessage>;

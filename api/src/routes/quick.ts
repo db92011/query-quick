@@ -5,6 +5,7 @@ type Env = {
   DB: D1Database;
   FILES?: R2Bucket;
   WISHLIST_INDEX?: Vectorize;
+  AI?: Ai;
   AGENT_DISCOVERY_QUEUE?: Queue<AgentEngineQueueMessage>;
   AGENT_VERIFICATION_QUEUE?: Queue<AgentEngineQueueMessage>;
   WISHLIST_EXTRACTION_QUEUE?: Queue<AgentEngineQueueMessage>;
@@ -1120,6 +1121,32 @@ async function generateClaudeCandidates(env: Env, body: Record<string, unknown>)
   return candidatesFromRaw(parseAgentCandidates(text));
 }
 
+function workersAiText(data: unknown) {
+  if (typeof data === "string") return data;
+  const response = (data as { response?: unknown })?.response;
+  return typeof response === "string" ? response : "";
+}
+
+async function generateWorkersAiCandidates(env: Env, body: Record<string, unknown>) {
+  if (!env.AI) throw badRequest("Workers AI discovery is not configured.", 503);
+  if (!clean(body.search_context)) throw badRequest("Workers AI discovery needs search snippets.", 422);
+  const data = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
+    messages: [
+      {
+        role: "system",
+        content: "You extract source-backed literary agent candidate leads from supplied search snippets. Use only the supplied snippets and return JSON only.",
+      },
+      { role: "user", content: candidateDiscoveryPrompt(body) },
+    ],
+    max_tokens: 6000,
+    temperature: 0.1,
+  }) as unknown;
+  return candidatesFromRaw(parseAgentCandidates(workersAiText(data)), {
+    search_context_used: true,
+    source: "workers_ai_snippet_discovery",
+  });
+}
+
 function searchQueriesForLane(body: Record<string, unknown>) {
   const genre = clean(body.genre);
   const subgenre = clean(body.subgenre);
@@ -1402,6 +1429,7 @@ async function generateDiscoveryPass(env: Env, body: Record<string, unknown>) {
   if (env.OPENAI_API_KEY) providers.push({ name: "OpenAI", run: generateAgentCandidates(env, body) });
   if (env.GEMINI_API_KEY) providers.push({ name: "Gemini", run: generateGeminiCandidates(env, body) });
   if (env.ANTHROPIC_API_KEY) providers.push({ name: "Claude", run: generateClaudeCandidates(env, body) });
+  if (env.AI && clean(body.search_context)) providers.push({ name: "Workers AI", run: generateWorkersAiCandidates(env, body) });
   if (!providers.length) throw badRequest("Agent discovery is not configured. Add at least one AI provider key.", 503);
 
   const results = await Promise.allSettled(providers.map((provider) => provider.run));
@@ -1519,7 +1547,7 @@ async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>
 }
 
 async function generateAgents(env: Env, body: Record<string, unknown>) {
-  if (!env.OPENAI_API_KEY) throw badRequest("Agent search is not configured yet. Missing OPENAI_API_KEY.", 503);
+  if (!env.OPENAI_API_KEY && !env.AI) throw badRequest("Agent search is not configured yet. Missing OPENAI_API_KEY or Workers AI binding.", 503);
   const sourceCandidates = sourceCandidateList(body);
   if (sourceCandidates.length > ENRICHMENT_BATCH_SIZE) {
     const chunks = chunkArray(sourceCandidates, ENRICHMENT_BATCH_SIZE);
@@ -1694,6 +1722,8 @@ query_letter, concise_description, synopsis, first_pages, sample_chapters, propo
     },
   };
 
+  if (!env.OPENAI_API_KEY) return generateAgentsWithWorkersAi(env, prompt);
+
   let response: Response;
   try {
     response = await fetch("https://api.openai.com/v1/responses", {
@@ -1724,10 +1754,14 @@ query_letter, concise_description, synopsis, first_pages, sample_chapters, propo
       }),
     });
   } catch (error) {
+    if (env.AI) return generateAgentsWithWorkersAi(env, prompt);
     throw error;
   }
   const data = await response.json() as { error?: { message?: string } };
-  if (!response.ok) throw badRequest(data.error?.message || "Agent research failed.", response.status);
+  if (!response.ok) {
+    if (env.AI) return generateAgentsWithWorkersAi(env, prompt);
+    throw badRequest(data.error?.message || "Agent research failed.", response.status);
+  }
   const parsed = JSON.parse(extractResponseText(data)) as { agents?: AgentRecord[] };
   const rawAgents = parsed.agents || [];
   const normalized = rawAgents.map(normalizeAgent);
@@ -1787,6 +1821,33 @@ async function generateLiveCandidatePoolForResponse(env: Env, body: Record<strin
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
   }
+}
+
+async function generateAgentsWithWorkersAi(env: Env, prompt: string) {
+  if (!env.AI) throw badRequest("Workers AI Agent Intel is not configured.", 503);
+  const data = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
+    messages: [
+      {
+        role: "system",
+        content: "You extract literary agent submission requirements from supplied source snippets. Use only supplied evidence and return JSON only.",
+      },
+      { role: "user", content: prompt },
+    ],
+    max_tokens: 6000,
+    temperature: 0.1,
+  }) as unknown;
+  const parsed = JSON.parse(extractJsonText(workersAiText(data))) as { agents?: AgentRecord[] };
+  const rawAgents = parsed.agents || [];
+  const agents = filterAgents(rawAgents.map(normalizeAgent)).map(normalizeAgent);
+  return {
+    agents,
+    diagnostics: {
+      raw_count: rawAgents.length,
+      candidate_count: agents.length,
+      verified_count: agents.length,
+      source: "workers_ai_guideline_enrichment",
+    },
+  };
 }
 
 function submissionRequirementsForAgent(agent: AgentRecord) {
