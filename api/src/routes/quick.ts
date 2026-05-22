@@ -3454,6 +3454,11 @@ async function processAgentEngineMessage(env: Env, message: AgentEngineQueueMess
   }
 }
 
+function shouldRetryQueueFailure(message: string) {
+  const text = message.toLowerCase();
+  return !/(quota|credit balance|billing|queries per day|rate-limit|free_tier|spending limit)/.test(text);
+}
+
 export async function handleAgentEngineQueue(batch: MessageBatch<AgentEngineQueueMessage>, env: Env) {
   for (const message of batch.messages) {
     try {
@@ -3466,7 +3471,11 @@ export async function handleAgentEngineQueue(batch: MessageBatch<AgentEngineQueu
       await markEngineJob(env, message.body.job_id, "failed", {
         error: failureMessage,
       });
-      message.retry({ delaySeconds: Math.min(3600, 60 * Math.max(1, message.attempts)) });
+      if (shouldRetryQueueFailure(failureMessage)) {
+        message.retry({ delaySeconds: Math.min(3600, 60 * Math.max(1, message.attempts)) });
+      } else {
+        message.ack();
+      }
     }
   }
 }
