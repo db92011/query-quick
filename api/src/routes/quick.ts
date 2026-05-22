@@ -502,9 +502,18 @@ function normalizeAgent(agent: AgentRecord): AgentRecord {
     submission_route_notes: clean(agent.submission_route_notes),
     required_materials: requiredMaterials,
   };
+  const inferredSchema = submissionSchemaForAgent(normalized);
+  const existingFormFields =
+    agent.submission_schema?.form_fields && Object.keys(agent.submission_schema.form_fields).length
+      ? agent.submission_schema.form_fields
+      : inferredSchema.form_fields;
   return {
     ...normalized,
-    submission_schema: agent.submission_schema || submissionSchemaForAgent(normalized),
+    submission_schema: {
+      ...(agent.submission_schema || {}),
+      ...inferredSchema,
+      form_fields: existingFormFields,
+    },
   };
 }
 
@@ -2250,6 +2259,7 @@ async function refreshAgentScore(env: Env, agentId: string) {
 }
 
 async function saveAgentToMaster(env: Env, body: Record<string, unknown>, agent: AgentRecord, now: string) {
+  agent = normalizeAgent(agent);
   const normalizedKey = normalizedAgentKey(agent);
   const agentId = `agent_${normalizedKey}`;
   await run(
@@ -3059,15 +3069,19 @@ export async function handleAgentIntelBackfill(request: Request, env: Env) {
   const limit = Math.max(1, Math.min(25, Number(body.limit || 6)));
   const rows = await all<{ id: string; matched_genre: string; matched_subgenre: string; genre_fit: string }>(
     env.DB,
-    `SELECT id, matched_genre, matched_subgenre, genre_fit
-     FROM quick_agents
-     WHERE open_status = 'open'
+    `SELECT qa.id, qa.matched_genre, qa.matched_subgenre, qa.genre_fit
+     FROM quick_agents qa
+     LEFT JOIN quick_agent_submission_schema qss ON qss.agent_id = qa.id
+     WHERE qa.open_status = 'open'
        AND (
-         requirements_summary = 'Building Agent Intel...'
-         OR email_opener = ''
-         OR required_materials_json = '["query_letter"]'
+         qa.requirements_summary = 'Building Agent Intel...'
+         OR qa.email_opener = ''
+         OR qa.required_materials_json = '["query_letter"]'
+         OR qss.agent_id IS NULL
+         OR (qa.required_materials_json LIKE '%first_pages%' AND COALESCE(qss.sample_pages, 0) = 0)
+         OR (qa.requirements_summary LIKE '%Sample requirement detected:%' AND COALESCE(qss.sample_pages, 0) = 0)
        )
-     ORDER BY last_seen_at DESC, confidence_score DESC
+     ORDER BY qa.last_seen_at DESC, qa.confidence_score DESC
      LIMIT ?1`,
     [limit]
   );
