@@ -3319,7 +3319,7 @@ async function deterministicRequirementAgent(agent: AgentRecord) {
     `Submission route: ${agent.query_method} via ${submissionRouteUrl(agent)}.`,
   ].filter(Boolean).join(" ");
 
-  return normalizeAgent({
+  const next = normalizeAgent({
     ...agent,
     requirements_summary: summary,
     required_materials: requiredMaterials,
@@ -3342,6 +3342,10 @@ async function deterministicRequirementAgent(agent: AgentRecord) {
       ...usable.map((snippet) => snippet.url),
     ].map(clean).filter(Boolean))),
   });
+  return {
+    ...next,
+    submission_schema: submissionSchemaForAgent(next),
+  };
 }
 
 async function processAgentDiscoveryJob(env: Env, message: AgentEngineQueueMessage) {
