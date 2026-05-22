@@ -1410,7 +1410,8 @@ async function generateDiscoveryPass(env: Env, body: Record<string, unknown>) {
   if (!fulfilled.length) {
     const errors = await Promise.all(results.map(async (result, index) => {
       if (result.status === "fulfilled") return "";
-      return `${providers[index]?.name || "provider"}: ${await errorMessage(result.reason, "request failed")}`;
+      const providerError = await errorMessage(result.reason, "request failed");
+      return `${providers[index]?.name || "provider"}: ${providerError.slice(0, 280)}`;
     }));
     throw badRequest(`All discovery providers failed. ${errors.filter(Boolean).join(" | ")}`, 502);
   }
@@ -2997,7 +2998,7 @@ async function markEngineJob(env: Env, jobId: string | undefined, status: string
         `UPDATE quick_agent_engine_jobs
          SET status = 'failed', last_error = ?1, finished_at = ?2
          WHERE id = ?3`,
-        [clean(patch.error).slice(0, 500), now, jobId]
+        [clean(patch.error).slice(0, 1500), now, jobId]
       );
       return;
     }
