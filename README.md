@@ -68,6 +68,29 @@ OpenAI, Gemini, Claude, web search, source parsing, and Vectorize embedding writ
 
 Validated source paths are treated as operational intelligence. When AALA, QueryManager, MSWL, agency pages, or other source paths produce usable open agents, they are promoted into `quick_validated_agent_paths` with genre lane, yield, priority, confidence, and next-check timing. Cron uses those validated paths before wandering into lower-yield research.
 
+## Submission Routing Engine
+
+Query Quick is not a generic send button. Each prepared agent record carries a cached submission schema that is treated as part of the agent identity until the verification engine refreshes it.
+
+Backend-owned submission intelligence lives in `quick_agent_submission_schema`:
+
+- submission method and route URL
+- query letter, synopsis, bio, and sample-page requirements
+- exact sample page count when the agent asks for first 5, 10, 15, 20, or 50 pages
+- attachment and form-field rules
+- QueryManager/email capability flags
+- last verification timestamp and confidence
+
+The app shell owns the writer's local master kit. The submit action bridges the two:
+
+1. read `agent.submission_schema`
+2. validate the local writer kit has the required components
+3. pull the exact items required by that agent
+4. slice the stored first-50-page stack to the requested page count
+5. copy/route the assembled package through email, QueryManager, QueryTracker, or the verified form route
+
+Search stays instant because schemas are prepared in D1. Submit prep is deterministic because the app does not guess what to send; it follows the attached schema.
+
 ## Agent Discovery Frame
 
 Query Quick is not a one-shot "find every agent" prompt. It is a subscriber-specific discovery and normalization engine.

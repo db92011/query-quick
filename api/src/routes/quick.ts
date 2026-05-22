@@ -83,6 +83,7 @@ type AgentRecord = {
   >;
   wishlist_summary?: string;
   submission_requirements?: Record<string, unknown>;
+  submission_schema?: AgentSubmissionSchema;
   open_status: "open" | "selective" | "closed";
   source_url: string;
   source_urls?: string[];
@@ -95,6 +96,22 @@ type AgentRecord = {
   confidence_score: number;
   seen_before?: boolean;
   intel_pending?: boolean;
+};
+
+type AgentSubmissionSchema = {
+  method: AgentRecord["query_method"];
+  requires_query_letter: boolean;
+  requires_synopsis: boolean;
+  synopsis_type: "" | "short" | "1_page" | "full";
+  requires_bio: boolean;
+  sample_pages: number;
+  attachments_required: string[];
+  form_fields: Record<string, unknown>;
+  querymanager_enabled: boolean;
+  email_submission_enabled: boolean;
+  submission_url: string;
+  last_verified: string;
+  confidence: number;
 };
 
 type AgentCandidate = {
@@ -366,6 +383,92 @@ function inferRequiredMaterials(value: string) {
   return inferred;
 }
 
+function tokenToPageCount(value: string) {
+  const normalized = value.toLowerCase().replace(/\s+/g, "-");
+  const numeric = Number(normalized);
+  if (Number.isFinite(numeric) && numeric > 0) return Math.max(1, Math.min(50, Math.floor(numeric)));
+  const words: Record<string, number> = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
+    eleven: 11,
+    twelve: 12,
+    thirteen: 13,
+    fourteen: 14,
+    fifteen: 15,
+    twenty: 20,
+    "twenty-five": 25,
+    thirty: 30,
+    forty: 40,
+    fifty: 50,
+  };
+  return words[normalized] || 0;
+}
+
+function inferSamplePageCount(value: string) {
+  const numberPattern = "(\\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|twenty|twenty five|twenty-five|thirty|forty|fifty)";
+  const text = normalizePageText(value);
+  const patterns = [
+    new RegExp(`first\\s+${numberPattern}\\s+(?:manuscript\\s+)?pages?`),
+    new RegExp(`${numberPattern}\\s*[- ]page\\s+(?:sample|excerpt|submission|attachment)`),
+    new RegExp(`(?:send|submit|include|paste|attach|upload)\\s+(?:the\\s+)?(?:first\\s+)?${numberPattern}\\s+(?:manuscript\\s+)?pages?`),
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const count = match?.[1] ? tokenToPageCount(match[1]) : 0;
+    if (count) return count;
+  }
+  return 0;
+}
+
+function inferSynopsisType(value: string): AgentSubmissionSchema["synopsis_type"] {
+  const text = normalizePageText(value);
+  if (!/synopsis/.test(text)) return "";
+  if (/1[- ]page synopsis|one[- ]page synopsis|single[- ]page synopsis/.test(text)) return "1_page";
+  if (/short synopsis|brief synopsis|concise synopsis/.test(text)) return "short";
+  if (/full synopsis|complete synopsis/.test(text)) return "full";
+  return "";
+}
+
+function submissionSchemaForAgent(agent: AgentRecord): AgentSubmissionSchema {
+  const text = [
+    agent.requirements_summary,
+    agent.verification_notes,
+    agent.submission_route_notes,
+    JSON.stringify(agent.submission_requirements || {}),
+  ].filter(Boolean).join(" ");
+  const required = new Set(agent.required_materials || inferRequiredMaterials(text));
+  required.add("query_letter");
+  const samplePages = inferSamplePageCount(text);
+  if (samplePages) required.add("first_pages");
+  const attachmentsRequired = Array.from(required).map((field) => (
+    field === "first_pages" && samplePages ? `first_${samplePages}_pages` : field
+  ));
+  const routeUrl = submissionRouteUrl(agent);
+  return {
+    method: agent.query_method,
+    requires_query_letter: required.has("query_letter"),
+    requires_synopsis: required.has("synopsis"),
+    synopsis_type: inferSynopsisType(text),
+    requires_bio: required.has("bio_paragraph"),
+    sample_pages: samplePages,
+    attachments_required: attachmentsRequired,
+    form_fields: {},
+    querymanager_enabled: agent.query_method === "querymanager" || routeUrl.includes("querymanager.com"),
+    email_submission_enabled: agent.query_method === "email",
+    submission_url: agent.query_method === "email" ? agent.public_email || "" : routeUrl,
+    last_verified: agent.last_verified,
+    confidence: Math.max(0, Math.min(100, Number(agent.confidence_score || 0))),
+  };
+}
+
 function normalizeAgent(agent: AgentRecord): AgentRecord {
   const requirementText = [
     agent.requirements_summary,
@@ -375,7 +478,12 @@ function normalizeAgent(agent: AgentRecord): AgentRecord {
     agent.fit_reason,
   ].map(clean).join(" ");
   const inferredMaterials = inferRequiredMaterials(requirementText);
-  return {
+  const requiredMaterials: NonNullable<AgentRecord["required_materials"]> = Array.from(new Set([
+    "query_letter",
+    ...inferredMaterials,
+    ...(Array.isArray(agent.required_materials) ? agent.required_materials : []),
+  ]));
+  const normalized: AgentRecord = {
     ...agent,
     matched_genre: clean(agent.matched_genre),
     matched_subgenre: clean(agent.matched_subgenre),
@@ -391,11 +499,11 @@ function normalizeAgent(agent: AgentRecord): AgentRecord {
     submission_route_verified_at: clean(agent.submission_route_verified_at),
     submission_route_status: Number(agent.submission_route_status || 0),
     submission_route_notes: clean(agent.submission_route_notes),
-    required_materials: Array.from(new Set([
-      "query_letter",
-      ...inferredMaterials,
-      ...(Array.isArray(agent.required_materials) ? agent.required_materials : []),
-    ])),
+    required_materials: requiredMaterials,
+  };
+  return {
+    ...normalized,
+    submission_schema: agent.submission_schema || submissionSchemaForAgent(normalized),
   };
 }
 
@@ -1659,6 +1767,7 @@ async function generateLiveCandidatePoolForResponse(env: Env, body: Record<strin
 }
 
 function submissionRequirementsForAgent(agent: AgentRecord) {
+  const schema = agent.submission_schema || submissionSchemaForAgent(agent);
   return {
     query_method: agent.query_method,
     submission_url: agent.submission_url || "",
@@ -1667,10 +1776,62 @@ function submissionRequirementsForAgent(agent: AgentRecord) {
     route_verified: Boolean(agent.submission_route_verified),
     route_status: Number(agent.submission_route_status || 0),
     required_materials: agent.required_materials || ["query_letter"],
+    submission_schema: schema,
     open_status: agent.open_status,
     last_verified: agent.last_verified,
     verification_notes: clean(agent.verification_notes),
   };
+}
+
+async function saveAgentSubmissionSchema(env: Env, agentId: string, agent: AgentRecord, now: string) {
+  const schema = agent.submission_schema || submissionSchemaForAgent(agent);
+  try {
+    await run(
+      env.DB,
+      `INSERT INTO quick_agent_submission_schema (
+         agent_id, submission_method, submission_url, requires_query_letter, requires_synopsis,
+         synopsis_type, requires_bio, sample_pages, attachment_rules_json, form_fields_json,
+         querymanager_enabled, email_submission_enabled, last_verified, confidence, schema_json, updated_at
+       )
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+       ON CONFLICT(agent_id) DO UPDATE SET
+         submission_method = excluded.submission_method,
+         submission_url = excluded.submission_url,
+         requires_query_letter = excluded.requires_query_letter,
+         requires_synopsis = excluded.requires_synopsis,
+         synopsis_type = excluded.synopsis_type,
+         requires_bio = excluded.requires_bio,
+         sample_pages = excluded.sample_pages,
+         attachment_rules_json = excluded.attachment_rules_json,
+         form_fields_json = excluded.form_fields_json,
+         querymanager_enabled = excluded.querymanager_enabled,
+         email_submission_enabled = excluded.email_submission_enabled,
+         last_verified = excluded.last_verified,
+         confidence = excluded.confidence,
+         schema_json = excluded.schema_json,
+         updated_at = excluded.updated_at`,
+      [
+        agentId,
+        schema.method,
+        schema.submission_url,
+        schema.requires_query_letter ? 1 : 0,
+        schema.requires_synopsis ? 1 : 0,
+        schema.synopsis_type,
+        schema.requires_bio ? 1 : 0,
+        schema.sample_pages,
+        JSON.stringify(schema.attachments_required),
+        JSON.stringify(schema.form_fields || {}),
+        schema.querymanager_enabled ? 1 : 0,
+        schema.email_submission_enabled ? 1 : 0,
+        schema.last_verified || agent.last_verified || now,
+        Number(schema.confidence || agent.confidence_score || 0),
+        JSON.stringify(schema),
+        now,
+      ]
+    );
+  } catch {
+    // Older local databases may not have the schema table until migrations run.
+  }
 }
 
 async function saveAgentMasterFacets(env: Env, agentId: string, body: Record<string, unknown>, agent: AgentRecord, now: string) {
@@ -2081,6 +2242,7 @@ async function saveAgentToMaster(env: Env, body: Record<string, unknown>, agent:
   );
 
   await saveAgentMasterFacets(env, agentId, body, agent, now);
+  await saveAgentSubmissionSchema(env, agentId, agent, now);
   if (agent.submission_route_verified_at || agent.submission_route_status) {
     await recordAgentStatusCheck(
       env,
@@ -2147,14 +2309,28 @@ function rowToIntelAgent(row: {
   required_materials_json: string;
   wishlist_summary?: string;
   submission_requirements_json?: string;
+  schema_json?: string;
+  schema_method?: AgentRecord["query_method"];
+  schema_submission_url?: string;
+  schema_requires_query_letter?: number;
+  schema_requires_synopsis?: number;
+  schema_synopsis_type?: AgentSubmissionSchema["synopsis_type"];
+  schema_requires_bio?: number;
+  schema_sample_pages?: number;
+  schema_attachment_rules_json?: string;
+  schema_form_fields_json?: string;
+  schema_querymanager_enabled?: number;
+  schema_email_submission_enabled?: number;
+  schema_last_verified?: string;
+  schema_confidence?: number;
   submission_route_verified: number;
   submission_route_verified_at: string;
   submission_route_status: number;
   submission_route_notes: string;
   last_verified: string;
   confidence_score: number;
-}) {
-  return normalizeAgent({
+}): AgentRecord {
+  const baseAgent = normalizeAgent({
     agent_name: row.agent_name,
     agency: row.agency,
     genre_fit: row.genre_fit,
@@ -2188,6 +2364,42 @@ function rowToIntelAgent(row: {
     last_verified: row.last_verified,
     confidence_score: row.confidence_score,
   });
+  if (row.schema_json) {
+    try {
+      const parsed = JSON.parse(row.schema_json) as AgentSubmissionSchema;
+      return { ...baseAgent, submission_schema: parsed };
+    } catch {
+      // Fall back to the typed columns below.
+    }
+  }
+  if (row.schema_method) {
+    const attachments = safeJsonArray(row.schema_attachment_rules_json || "[]", baseAgent.required_materials || ["query_letter"]);
+    return {
+      ...baseAgent,
+      submission_schema: {
+        method: row.schema_method,
+        requires_query_letter: row.schema_requires_query_letter !== 0,
+        requires_synopsis: Boolean(row.schema_requires_synopsis),
+        synopsis_type: row.schema_synopsis_type || "",
+        requires_bio: Boolean(row.schema_requires_bio),
+        sample_pages: Number(row.schema_sample_pages || 0),
+        attachments_required: attachments,
+        form_fields: (() => {
+          try {
+            return JSON.parse(row.schema_form_fields_json || "{}") as Record<string, unknown>;
+          } catch {
+            return {};
+          }
+        })(),
+        querymanager_enabled: Boolean(row.schema_querymanager_enabled),
+        email_submission_enabled: Boolean(row.schema_email_submission_enabled),
+        submission_url: row.schema_submission_url || submissionRouteUrl(baseAgent),
+        last_verified: row.schema_last_verified || baseAgent.last_verified,
+        confidence: Number(row.schema_confidence || baseAgent.confidence_score || 0),
+      },
+    };
+  }
+  return baseAgent;
 }
 
 async function storedOpenAgentPool(env: Env, body: Record<string, unknown>) {
@@ -2242,6 +2454,20 @@ async function storedOpenAgentPoolFromMaster(env: Env, body: Record<string, unkn
               COALESCE(qr.required_materials_json, qa.required_materials_json) AS required_materials_json,
               COALESCE(qr.wishlist_summary, '') AS wishlist_summary,
               COALESCE(qr.submission_requirements_json, '{}') AS submission_requirements_json,
+              qss.schema_json AS schema_json,
+              qss.submission_method AS schema_method,
+              qss.submission_url AS schema_submission_url,
+              qss.requires_query_letter AS schema_requires_query_letter,
+              qss.requires_synopsis AS schema_requires_synopsis,
+              qss.synopsis_type AS schema_synopsis_type,
+              qss.requires_bio AS schema_requires_bio,
+              qss.sample_pages AS schema_sample_pages,
+              qss.attachment_rules_json AS schema_attachment_rules_json,
+              qss.form_fields_json AS schema_form_fields_json,
+              qss.querymanager_enabled AS schema_querymanager_enabled,
+              qss.email_submission_enabled AS schema_email_submission_enabled,
+              qss.last_verified AS schema_last_verified,
+              qss.confidence AS schema_confidence,
               qa.submission_route_verified,
               qa.submission_route_verified_at,
               qa.submission_route_status,
@@ -2251,6 +2477,7 @@ async function storedOpenAgentPoolFromMaster(env: Env, body: Record<string, unkn
        FROM quick_agent_genres qag
        JOIN quick_agents qa ON qa.id = qag.agent_id
        LEFT JOIN quick_agent_requirements qr ON qr.agent_id = qa.id
+       LEFT JOIN quick_agent_submission_schema qss ON qss.agent_id = qa.id
        WHERE qa.open_status IN ('open', 'selective')
          AND qag.active = 1
          AND (${termClauses.join(" OR ")})
@@ -2364,6 +2591,20 @@ async function instantOpenAgentSearch(env: Env, body: Record<string, unknown>) {
               COALESCE(qr.required_materials_json, qa.required_materials_json) AS required_materials_json,
               COALESCE(qr.wishlist_summary, '') AS wishlist_summary,
               COALESCE(qr.submission_requirements_json, '{}') AS submission_requirements_json,
+              qss.schema_json AS schema_json,
+              qss.submission_method AS schema_method,
+              qss.submission_url AS schema_submission_url,
+              qss.requires_query_letter AS schema_requires_query_letter,
+              qss.requires_synopsis AS schema_requires_synopsis,
+              qss.synopsis_type AS schema_synopsis_type,
+              qss.requires_bio AS schema_requires_bio,
+              qss.sample_pages AS schema_sample_pages,
+              qss.attachment_rules_json AS schema_attachment_rules_json,
+              qss.form_fields_json AS schema_form_fields_json,
+              qss.querymanager_enabled AS schema_querymanager_enabled,
+              qss.email_submission_enabled AS schema_email_submission_enabled,
+              qss.last_verified AS schema_last_verified,
+              qss.confidence AS schema_confidence,
               qa.submission_route_verified,
               qa.submission_route_verified_at,
               qa.submission_route_status,
@@ -2374,6 +2615,7 @@ async function instantOpenAgentSearch(env: Env, body: Record<string, unknown>) {
        FROM quick_agent_genres qag
        JOIN quick_agents qa ON qa.id = qag.agent_id
        LEFT JOIN quick_agent_requirements qr ON qr.agent_id = qa.id
+       LEFT JOIN quick_agent_submission_schema qss ON qss.agent_id = qa.id
        LEFT JOIN quick_agent_scores qs ON qs.agent_id = qa.id
        WHERE qa.open_status = 'open'
          AND qag.active = 1

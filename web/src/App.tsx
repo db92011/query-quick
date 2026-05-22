@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Navigate, Route, Routes, useNavigate, useSearchParams } from "react-router-dom";
-import { api, AuthProvider, type Session, uploadFile, useAuth } from "./lib";
+import { api, AuthProvider, type Session, useAuth } from "./lib";
+
+type QueryMethod = "email" | "querytracker" | "querymanager" | "form" | "portal";
 
 type AgentRecord = {
   id?: string;
@@ -13,7 +15,7 @@ type AgentRecord = {
   subgenre_evidence?: string;
   fit_reason?: string;
   email_opener?: string;
-  query_method: "email" | "querytracker" | "querymanager" | "form" | "portal";
+  query_method: QueryMethod;
   submission_url?: string;
   public_email?: string;
   requirements_summary: string;
@@ -22,6 +24,7 @@ type AgentRecord = {
   source_url: string;
   source_urls?: string[];
   verification_notes?: string;
+  submission_schema?: AgentSubmissionSchema;
   submission_route_verified?: boolean;
   submission_route_verified_at?: string;
   submission_route_status?: number;
@@ -30,6 +33,26 @@ type AgentRecord = {
   confidence_score: number;
   seen_before?: boolean;
   intel_pending?: boolean;
+};
+
+type AgentSubmissionSchema = {
+  method?: QueryMethod;
+  submission_method?: QueryMethod;
+  required_fields?: string[];
+  attachments_required?: string[];
+  sample_pages?: number;
+  sample_page_count?: number;
+  requires_query_letter?: boolean;
+  requires_synopsis?: boolean;
+  requires_bio?: boolean;
+  synopsis_type?: string;
+  form_fields?: Record<string, unknown>;
+  querymanager_url?: string;
+  email_address?: string;
+  submission_url?: string;
+  route_url?: string;
+  last_verified?: string;
+  confidence?: number;
 };
 
 type Profile = {
@@ -43,6 +66,7 @@ type Profile = {
 
 type SubmissionKit = {
   manuscript_complete: boolean;
+  query_letter: string;
   data_paragraph: string;
   plot_paragraph: string;
   bio_paragraph: string;
@@ -96,6 +120,16 @@ type QueriedAgentRecord = {
   follow_up_notes: string;
 };
 
+type PortableKitPayload = {
+  version: 1;
+  exported_at: string;
+  profile: Profile;
+  submission_kit: SubmissionKit;
+  submission_files: SubmissionFiles;
+  queried_agents: QueriedAgentRecord[];
+  sent_count: number;
+};
+
 const emptyProfile: Profile = {
   name: "",
   book_title: "",
@@ -107,6 +141,7 @@ const emptyProfile: Profile = {
 
 const emptySubmissionKit: SubmissionKit = {
   manuscript_complete: false,
+  query_letter: "",
   data_paragraph: "",
   plot_paragraph: "",
   bio_paragraph: "",
@@ -227,6 +262,127 @@ function formatUtcDate(value: string) {
 
 function validPacketKey(value: string): value is PacketKey {
   return packetOrder.includes(value as PacketKey);
+}
+
+function safeFilePart(value: string) {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 42);
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+const pageNumberWords: Record<string, number> = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+  thirteen: 13,
+  fourteen: 14,
+  fifteen: 15,
+  twenty: 20,
+  "twenty-five": 25,
+  thirty: 30,
+  forty: 40,
+  fifty: 50,
+};
+
+type FirstPageStackPage = {
+  number: number;
+  text: string;
+};
+
+function clampPageCount(value: number) {
+  return Math.max(1, Math.min(50, Math.floor(value)));
+}
+
+function pageCountTokenToNumber(value: string) {
+  const normalized = value.toLowerCase().replace(/\s+/g, "-");
+  const numeric = Number(normalized);
+  if (Number.isFinite(numeric) && numeric > 0) return clampPageCount(numeric);
+  return pageNumberWords[normalized] ? clampPageCount(pageNumberWords[normalized]) : null;
+}
+
+function parseFirstPageStack(value: string): FirstPageStackPage[] {
+  const normalized = value.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return [];
+
+  const formFeedPages = normalized.split(/\f+/).map((text) => text.trim()).filter(Boolean);
+  if (formFeedPages.length > 1) {
+    return formFeedPages.slice(0, 50).map((text, index) => ({ number: index + 1, text }));
+  }
+
+  const markerPages: FirstPageStackPage[] = [];
+  let activeNumber: number | null = null;
+  let activeLines: string[] = [];
+
+  function flushActivePage() {
+    if (!activeNumber) return;
+    const text = activeLines.join("\n").trim();
+    markerPages.push({ number: activeNumber, text });
+  }
+
+  for (const line of normalized.split("\n")) {
+    const marker = line.trim().match(/^(?:-{2,}\s*)?(?:page\s*)?(\d{1,2})(?:\s*(?:of|\/)\s*50)?(?:\s*[:.)-]\s*(.*))?$/i);
+    if (marker) {
+      flushActivePage();
+      activeNumber = clampPageCount(Number(marker[1]));
+      activeLines = marker[2]?.trim() ? [marker[2].trim()] : [];
+    } else {
+      activeLines.push(line);
+    }
+  }
+  flushActivePage();
+
+  if (markerPages.length) {
+    return markerPages.filter((page) => page.text).slice(0, 50);
+  }
+
+  const dividerPages = normalized.split(/\n\s*(?:-{3,}|={3,})\s*\n/).map((text) => text.trim()).filter(Boolean);
+  if (dividerPages.length > 1) {
+    return dividerPages.slice(0, 50).map((text, index) => ({ number: index + 1, text }));
+  }
+
+  return [{ number: 1, text: normalized }];
+}
+
+function inferRequestedFirstPageCount(agent?: AgentRecord) {
+  if (!agent) return null;
+  const numberPattern = "(\\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|twenty|twenty five|twenty-five|thirty|forty|fifty)";
+  const text = [
+    agent.requirements_summary,
+    agent.verification_notes,
+    agent.submission_route_notes,
+    ...(agent.required_materials || []),
+  ].filter(Boolean).join(" ").toLowerCase();
+
+  const patterns = [
+    new RegExp(`first\\s+${numberPattern}\\s+(?:manuscript\\s+)?pages?`),
+    new RegExp(`${numberPattern}\\s*[- ]page\\s+(?:sample|excerpt|submission|attachment)`),
+    new RegExp(`(?:send|submit|include|paste|attach|upload)\\s+(?:the\\s+)?(?:first\\s+)?${numberPattern}\\s+(?:manuscript\\s+)?pages?`),
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const count = match?.[1] ? pageCountTokenToNumber(match[1]) : null;
+    if (count) return count;
+  }
+  return null;
+}
+
+function formatFirstPageStack(value: string, requestedCount?: number | null) {
+  const pages = parseFirstPageStack(value);
+  if (!pages.length) return "";
+  const selected = pages.slice(0, clampPageCount(requestedCount || 50));
+  return selected.map((page) => `Page ${page.number}\n${page.text}`).join("\n\n");
 }
 
 function Header({ workspace = false }: { workspace?: boolean }) {
@@ -673,20 +829,9 @@ function Workspace() {
   async function updateSubmissionFile(key: SubmissionFileKey, fileList: FileList | null) {
     const file = fileList?.[0];
     if (!file) return;
-    setStatus(`Uploading ${file.name}...`);
-    try {
-      if (session) {
-        const formData = new FormData();
-        formData.set("kind", key);
-        formData.set("file", file);
-        await uploadFile("/api/submission-kit/file", formData, session.token);
-      }
-      setKitSaved(false);
-      setSubmissionFiles((current) => ({ ...current, [key]: file.name }));
-      setStatus(`Uploaded ${file.name}.`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not upload file.");
-    }
+    setKitSaved(false);
+    setSubmissionFiles((current) => ({ ...current, [key]: file.name }));
+    setStatus(`Saved ${file.name} on this device.`);
   }
 
   function buildQuery(agent: AgentRecord) {
@@ -719,9 +864,33 @@ ${body}`;
   }
 
   function requiredPacketKeys(agent: AgentRecord) {
-    const keys = (agent.required_materials || []).filter(validPacketKey);
+    const schemaFields = agent.submission_schema?.attachments_required || agent.submission_schema?.required_fields || [];
+    const schemaKeys = schemaFields
+      .map((field) => (field.match(/^first_\d{1,2}_pages$/) ? "first_pages" : field))
+      .filter(validPacketKey);
+    const keys = [...schemaKeys, ...(agent.required_materials || []).filter(validPacketKey)];
     const unique = Array.from(new Set<PacketKey>(["query_letter", ...keys]));
     return packetOrder.filter((key) => unique.includes(key));
+  }
+
+  function synopsisLabel(type?: string) {
+    if (type === "1_page") return "1-page synopsis";
+    if (type === "short") return "Short synopsis";
+    if (type === "full") return "Full synopsis";
+    return "Synopsis";
+  }
+
+  function packetLabelForAgent(key: PacketKey, agent: AgentRecord) {
+    if (key === "first_pages") {
+      const count = agent.submission_schema?.sample_pages || agent.submission_schema?.sample_page_count || inferRequestedFirstPageCount(agent);
+      return count ? `First ${count} pages` : "First pages";
+    }
+    if (key === "synopsis") return synopsisLabel(agent.submission_schema?.synopsis_type);
+    return materialLabels[key] || key;
+  }
+
+  function requiredMaterialLabels(agent: AgentRecord) {
+    return requiredPacketKeys(agent).map((key) => packetLabelForAgent(key, agent));
   }
 
   function validHttpUrl(value?: string) {
@@ -771,10 +940,10 @@ ${body}`;
   }
 
   function routeActionWithKitLabel(agent: AgentRecord) {
-    if (agent.query_method === "querytracker" || (agent.submission_url || "").includes("querytracker.net")) return "Open QueryTracker + Copy Kit";
-    if (agent.query_method === "querymanager") return "Open QueryManager + Copy Kit";
-    if (agent.query_method === "form") return "Open Website Form + Copy Kit";
-    return "Open Portal + Copy Kit";
+    if (agent.query_method === "querytracker" || (agent.submission_url || "").includes("querytracker.net")) return "Submit via QueryTracker";
+    if (agent.query_method === "querymanager") return "Submit via QueryManager";
+    if (agent.query_method === "form") return "Submit via Website Form";
+    return "Submit via Portal";
   }
 
   function verifiedRouteText(agent: AgentRecord) {
@@ -784,14 +953,14 @@ ${body}`;
   }
 
   async function copyRequiredKit(agent: AgentRecord) {
-    return copyPacket(requiredPacketKeys(agent));
+    return copyPacket(requiredPacketKeys(agent), agent);
   }
 
   function buildEmailBody(agent: AgentRecord) {
     const requiredKeys = requiredPacketKeys(agent);
-    const packetSections = requiredKeys.map(formatPacketMaterial).filter(Boolean);
+    const packetSections = requiredKeys.map((key) => formatPacketMaterial(key, agent)).filter(Boolean);
     const extraKeys = requiredKeys.filter((key) => key !== "query_letter");
-    const materialList = requiredKeys.map((key) => materialLabels[key] || key);
+    const materialList = requiredKeys.map((key) => packetLabelForAgent(key, agent));
     const includedLine = materialList.length
       ? `Based on your guidelines, I’ve included ${formatReadableList(materialList)} below.`
       : "";
@@ -823,7 +992,7 @@ ${profile.name || ""}`;
       return submissionKit.manuscript_complete ? "Complete manuscript: Yes" : "";
     }
     if (key === "query_letter") {
-      return "";
+      return submissionKit.query_letter.trim();
     }
     return String(submissionKit[key] || "").trim();
   }
@@ -833,14 +1002,20 @@ ${profile.name || ""}`;
     return submissionFiles[key] || "";
   }
 
-  function formatPacketMaterial(key: PacketKey) {
-    const title = materialLabels[key] || key;
-    const text = getPacketMaterialText(key);
+  function formatPacketMaterial(key: PacketKey, agent?: AgentRecord) {
+    const requestedPages = key === "first_pages"
+      ? agent?.submission_schema?.sample_pages || agent?.submission_schema?.sample_page_count || inferRequestedFirstPageCount(agent)
+      : null;
+    const title = key === "first_pages" && requestedPages
+      ? `First ${requestedPages} pages`
+      : materialLabels[key] || key;
+    const text = key === "first_pages"
+      ? formatFirstPageStack(submissionKit.first_pages, requestedPages)
+      : getPacketMaterialText(key);
     const fileName = getPacketMaterialFile(key);
     const body = [
       text,
       fileName ? `[Uploaded file: ${fileName}]` : "",
-      !text && !fileName && key === "query_letter" ? "[Query letter from Submission Kit]" : "",
     ].filter(Boolean).join("\n");
     if (!body) return "";
     return `${title}\n${"-".repeat(title.length)}\n${body}`;
@@ -856,12 +1031,8 @@ ${profile.name || ""}`;
     setStatus(`Copied ${materialLabels[key]}.`);
   }
 
-  async function copyPacket(keys: PacketKey[]) {
-    const packet = packetOrder
-      .filter((key) => keys.includes(key))
-      .map(formatPacketMaterial)
-      .filter(Boolean)
-      .join("\n\n");
+  async function copyPacket(keys: PacketKey[], agent?: AgentRecord) {
+    const packet = buildPacket(keys, agent);
     if (!packet) {
       setStatus("Nothing chosen has content yet.");
       return false;
@@ -871,8 +1042,141 @@ ${profile.name || ""}`;
     return true;
   }
 
+  function buildPacket(keys: PacketKey[], agent?: AgentRecord) {
+    return packetOrder
+      .filter((key) => keys.includes(key))
+      .map((key) => formatPacketMaterial(key, agent))
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  function buildPortableKitPayload(): PortableKitPayload {
+    return {
+      version: 1,
+      exported_at: new Date().toISOString(),
+      profile,
+      submission_kit: submissionKit,
+      submission_files: submissionFiles,
+      queried_agents: queriedAgents,
+      sent_count: sentCount,
+    };
+  }
+
+  function portableKitFileName() {
+    const project = safeFilePart(profile.book_title) || "writer-kit";
+    const date = new Date().toISOString().slice(0, 10);
+    return `query-quick-${project}-${date}.json`;
+  }
+
+  function fullKitText() {
+    const profileLines = [
+      profile.name ? `Author: ${profile.name}` : "",
+      profile.book_title ? `Book: ${profile.book_title}` : "",
+      profile.genre ? `Genre: ${profile.genre}` : "",
+      profile.subgenre ? `Subgenre: ${profile.subgenre}` : "",
+      profile.category ? `Category: ${profile.category}` : "",
+      profile.word_count ? `Word count: ${profile.word_count}` : "",
+      submissionKit.manuscript_complete ? "Complete manuscript: Yes" : "Complete manuscript: No",
+    ].filter(Boolean);
+    const profileBlock = profileLines.length ? `Project\n-------\n${profileLines.join("\n")}` : "";
+    return [profileBlock, buildPacket(packetOrder)].filter(Boolean).join("\n\n");
+  }
+
+  function exportPortableKit() {
+    const payload = JSON.stringify(buildPortableKitPayload(), null, 2);
+    const blob = new Blob([payload], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = portableKitFileName();
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setKitSaved(true);
+    setStatus("Portable writer kit exported.");
+  }
+
+  async function shareFullKit() {
+    const text = fullKitText();
+    if (!text.trim()) {
+      setStatus("Add kit content before sharing.");
+      return;
+    }
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: profile.book_title ? `Query Quick kit - ${profile.book_title}` : "Query Quick writer kit",
+          text,
+        });
+        setStatus("Opened sharing for your writer kit.");
+        return;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          setStatus("Sharing canceled.");
+          return;
+        }
+      }
+    }
+    await navigator.clipboard.writeText(text);
+    setStatus("Sharing is unavailable here, so Query Quick copied the kit.");
+  }
+
+  async function importPortableKit(fileList: FileList | null) {
+    const file = fileList?.[0];
+    if (!file) return;
+    try {
+      const parsed = JSON.parse(await file.text()) as Partial<PortableKitPayload>;
+      if (!isObject(parsed)) throw new Error("Invalid kit file.");
+      if (isObject(parsed.profile)) setProfile({ ...emptyProfile, ...parsed.profile });
+      if (isObject(parsed.submission_kit)) setSubmissionKit({ ...emptySubmissionKit, ...parsed.submission_kit });
+      if (isObject(parsed.submission_files)) setSubmissionFiles({ ...emptySubmissionFiles, ...parsed.submission_files });
+      if (Array.isArray(parsed.queried_agents)) setQueriedAgents(parsed.queried_agents);
+      if (typeof parsed.sent_count === "number" && Number.isFinite(parsed.sent_count)) setSentCount(parsed.sent_count);
+      setKitSaved(true);
+      setActiveView("kit");
+      setStatus(`Imported ${file.name}.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not import that writer kit.");
+    }
+  }
+
   function availableSpecificMaterials() {
     return packetOrder.filter((key) => formatPacketMaterial(key));
+  }
+
+  function storedFirstPageCount() {
+    return parseFirstPageStack(submissionKit.first_pages).length;
+  }
+
+  function hasPacketMaterial(key: PacketKey, agent?: AgentRecord) {
+    if (key === "manuscript_status") return submissionKit.manuscript_complete;
+    if (key === "first_pages") {
+      const requested = agent?.submission_schema?.sample_pages || agent?.submission_schema?.sample_page_count || inferRequestedFirstPageCount(agent) || 1;
+      const pages = storedFirstPageCount();
+      return pages >= requested || Boolean(submissionFiles.first_pages);
+    }
+    return Boolean(getPacketMaterialText(key) || getPacketMaterialFile(key));
+  }
+
+  function missingRequiredMaterials(agent: AgentRecord) {
+    return requiredPacketKeys(agent)
+      .filter((key) => !hasPacketMaterial(key, agent))
+      .map((key) => {
+        if (key === "first_pages") {
+          const requested = agent.submission_schema?.sample_pages || agent.submission_schema?.sample_page_count || inferRequestedFirstPageCount(agent);
+          return requested ? `First ${requested} pages (${storedFirstPageCount()} stored)` : "First pages";
+        }
+        return packetLabelForAgent(key, agent);
+      });
+  }
+
+  function requiredMaterialEntries(agent: AgentRecord) {
+    return requiredPacketKeys(agent).map((key) => ({
+      key,
+      label: packetLabelForAgent(key, agent),
+      ready: hasPacketMaterial(key, agent),
+    }));
   }
 
   function openCopySpecific() {
@@ -935,12 +1239,24 @@ ${profile.name || ""}`;
   }
 
   function emailAgent(agent: AgentRecord) {
+    const missing = missingRequiredMaterials(agent);
+    if (missing.length) {
+      setStatus(`Missing for ${agent.agent_name}: ${formatReadableList(missing)}.`);
+      setActiveView("kit");
+      return;
+    }
     const subject = encodeURIComponent(emailSubject(agent));
     const body = encodeURIComponent(buildEmailBody(agent));
     window.location.href = `mailto:${agent.public_email}?subject=${subject}&body=${body}`;
   }
 
   async function openSubmissionWithKit(agent: AgentRecord) {
+    const missing = missingRequiredMaterials(agent);
+    if (missing.length) {
+      setStatus(`Missing for ${agent.agent_name}: ${formatReadableList(missing)}.`);
+      setActiveView("kit");
+      return;
+    }
     const route = agent.submission_url || "";
     if (!validHttpUrl(route) || agent.submission_route_verified === false) {
       setStatus(`No verified live submission route is available for ${agent.agent_name}.`);
@@ -965,7 +1281,7 @@ ${profile.name || ""}`;
     const next = alreadySaved ? sentCount : sentCount + 1;
     setSentCount(next);
     localStorage.setItem("query-quick.sent", String(next));
-    const materials = requiredPacketKeys(agent).map((key) => materialLabels[key] || key);
+    const materials = requiredMaterialLabels(agent);
     setQueriedAgents((current) => {
       const existing = current.find((record) => record.id === id);
       const nextRecord: QueriedAgentRecord = {
@@ -1059,6 +1375,22 @@ ${profile.name || ""}`;
     );
   }
 
+  function ImportKitButton() {
+    return (
+      <label className="secondary-button file-button">
+        Import kit
+        <input
+          type="file"
+          accept="application/json,.json"
+          onChange={(event) => {
+            void importPortableKit(event.target.files);
+            event.currentTarget.value = "";
+          }}
+        />
+      </label>
+    );
+  }
+
   function FieldMeta({ value, max, fileName }: { value: string; max?: number; fileName?: string }) {
     return (
       <span className="field-meta">
@@ -1098,23 +1430,24 @@ ${profile.name || ""}`;
             <p className="main-subheading">
               {activeView === "search" ? (
                 <>
-                  <strong>Search returns prepared open-agent intelligence instantly.</strong> Query Quick keeps discovery, verification, wishlist extraction, and ranking running in the background.
+                  <strong>Search returns prepared open-agent intelligence instantly.</strong> Each open agent carries a cached submission schema for deterministic package assembly.
                 </>
               ) : activeView === "kit" ? (
-                "Build each submission item both ways: paste text for portal fields and upload the finished document when an agent asks for a file."
+                "Build your master writer kit once. Query Quick pulls the exact pieces each agent requires from this local inventory."
               ) : activeView === "profile" ? (
                 "Your book details power everything—agent matching and query formatting. The more accurate your input, the better your results."
               ) : (
                 "Track submitted agents, how they were queried, what was sent, and what happened next."
               )}
             </p>
+            {activeView !== "search" ? <p className="workspace-status" aria-live="polite">{status}</p> : null}
           </div>
           {activeView === "search" ? (
             <div className="main-actions" aria-label="Agent search actions">
               <button className="primary-button action-button" type="button" disabled={isSearching} onClick={findAgents}>Find matching agents</button>
               <div className="agent-action-note">
-                <p>Find matching agents reads the refreshed Query Quick intelligence engine by genre, subgenre, and category.</p>
-                <p>Only prepared open-agent records are returned; deeper discovery keeps running after the result appears.</p>
+                <p>Find matching agents reads the refreshed Query Quick intelligence engine by genre, subgenre, category, and cached submission schema.</p>
+                <p>Only prepared open-agent records are returned; submit prep is assembled from the writer kit on this device.</p>
               </div>
             </div>
           ) : null}
@@ -1124,6 +1457,21 @@ ${profile.name || ""}`;
           <div className="work-area">
             {activeView === "kit" ? (
               <>
+            <section className="kit-section portable-kit-section" aria-labelledby="portable-kit-title">
+              <div className="kit-heading">
+                <div>
+                  <p className="kicker">Device Kit</p>
+                  <h2 id="portable-kit-title">Portable writer kit</h2>
+                </div>
+                <div className="portable-actions">
+                  <button className="secondary-button" type="button" onClick={shareFullKit}>Share kit</button>
+                  <button className="secondary-button" type="button" onClick={exportPortableKit}>Export kit</button>
+                  <ImportKitButton />
+                </div>
+              </div>
+              <p className="portable-note">Keep one local kit on this device, then move a portable copy to your phone when you want to query from there.</p>
+            </section>
+
             <section className="kit-section query-upload-section" aria-labelledby="query-upload-title">
               <div className="kit-heading">
                 <div>
@@ -1136,11 +1484,16 @@ ${profile.name || ""}`;
               </div>
               <div className="query-upload-card">
                 <div>
-                  <strong>Upload query letter here</strong>
-                  <span>Use the finished query letter you want attached or referenced when an agent asks for a file.</span>
+                  <strong>Query letter master copy</strong>
+                  <span>Paste the version Query Quick should pull when an agent requires a query letter.</span>
                 </div>
                 <UploadLink id="query_letter" />
               </div>
+              <label className="kit-field query-letter-field">
+                <span className="material-title"><span>Query letter text</span><span className="material-actions"><PacketTools id="query_letter" /></span></span>
+                <textarea value={submissionKit.query_letter} onChange={(event) => updateSubmissionKit("query_letter", event.target.value)} />
+                <FieldMeta value={submissionKit.query_letter} fileName={submissionFiles.query_letter} />
+              </label>
               {submissionFiles.query_letter ? <p className="file-name">{submissionFiles.query_letter}</p> : null}
             </section>
 
@@ -1158,9 +1511,12 @@ ${profile.name || ""}`;
                   <FieldMeta value={submissionKit.synopsis} max={1000} fileName={submissionFiles.synopsis} />
                 </label>
                 <label className="kit-field">
-                  <span className="material-title"><span>First 50 pages</span><span className="material-actions"><UploadLink id="first_pages" /><PacketTools id="first_pages" /></span></span>
-                  <textarea value={submissionKit.first_pages} onChange={(event) => updateSubmissionKit("first_pages", event.target.value)} />
-                  <FieldMeta value={submissionKit.first_pages} fileName={submissionFiles.first_pages} />
+                  <span className="material-title"><span>First 50-page stack</span><span className="material-actions"><UploadLink id="first_pages" /><PacketTools id="first_pages" /></span></span>
+                  <textarea value={submissionKit.first_pages} onChange={(event) => updateSubmissionKit("first_pages", event.target.value)} placeholder={"Page 1\n...\n\nPage 2\n..."} />
+                  <span className="field-meta">
+                    <small>{wordCountText(submissionKit.first_pages)} · {storedFirstPageCount()} / 50 pages stored</small>
+                    {submissionFiles.first_pages ? <small>{submissionFiles.first_pages}</small> : <small>&nbsp;</small>}
+                  </span>
                 </label>
                 <label className="kit-field compact">
                   <span className="material-title"><span>Concise description</span><span className="material-actions"><UploadLink id="concise_description" /><PacketTools id="concise_description" /></span></span>
@@ -1299,10 +1655,13 @@ ${profile.name || ""}`;
                           <strong>{submissionRouteLabel(agent)}</strong>
                           <p>{agent.submission_route_notes || verifiedRouteText(agent)}</p>
                         </div>
-                        {agent.required_materials?.length ? (
-                          <div className="requirements-list" aria-label="Required materials">
-                            {agent.required_materials.map((material) => (
-                              <span key={material}>{materialLabels[material] || material}</span>
+                        {requiredMaterialEntries(agent).length ? (
+                          <div className="requirements-list schema-requirements" aria-label="Required materials">
+                            <strong>Requires</strong>
+                            {requiredMaterialEntries(agent).map((material) => (
+                              <span className={material.ready ? "material-ready" : "material-missing"} key={material.label}>
+                                {material.ready ? "✓" : "Needs"} {material.label}
+                              </span>
                             ))}
                           </div>
                         ) : null}
@@ -1321,10 +1680,10 @@ ${profile.name || ""}`;
                           {needsIntel ? "View Updating Intel" : "View Intel"}
                         </button>
                         {agent.query_method === "email" && agent.public_email ? (
-                          <button className="secondary-button" type="button" onClick={() => emailAgent(agent)}>Start Email</button>
+                          <button className="secondary-button" type="button" onClick={() => emailAgent(agent)}>Submit by Email</button>
                         ) : (
                           <button className="secondary-button" type="button" disabled={!canOpenSubmissionRoute(agent)} onClick={() => openSubmissionWithKit(agent)}>
-                            {canOpenSubmissionRoute(agent) ? routeActionWithKitLabel(agent) : "Route unavailable"}
+                            {canOpenSubmissionRoute(agent) ? routeActionWithKitLabel(agent) : "Submit unavailable"}
                           </button>
                         )}
                         <button className="secondary-button" type="button" onClick={() => markSent(agent)}>Mark Sent</button>
@@ -1488,20 +1847,23 @@ ${profile.name || ""}`;
                 </a>
               ))}
             </div>
-            {intelAgent.required_materials?.length ? (
-              <div className="requirements-list modal-requirements" aria-label="Agent Intel required materials">
-                {intelAgent.required_materials.map((material) => (
-                  <span key={material}>{materialLabels[material] || material}</span>
+            {requiredMaterialEntries(intelAgent).length ? (
+              <div className="requirements-list modal-requirements schema-requirements" aria-label="Agent Intel required materials">
+                <strong>Requires</strong>
+                {requiredMaterialEntries(intelAgent).map((material) => (
+                  <span className={material.ready ? "material-ready" : "material-missing"} key={material.label}>
+                    {material.ready ? "✓" : "Needs"} {material.label}
+                  </span>
                 ))}
               </div>
             ) : null}
             <div className="modal-actions intel-actions">
               <button className="secondary-button" type="button" onClick={() => copyRequiredKit(intelAgent)}>Copy Required Kit</button>
               {intelAgent.query_method === "email" && intelAgent.public_email ? (
-                <button className="primary-button" type="button" onClick={() => emailAgent(intelAgent)}>Start Email</button>
+                <button className="primary-button" type="button" onClick={() => emailAgent(intelAgent)}>Submit by Email</button>
               ) : (
                 <button className="primary-button" type="button" disabled={!canOpenSubmissionRoute(intelAgent)} onClick={() => openSubmissionWithKit(intelAgent)}>
-                  {canOpenSubmissionRoute(intelAgent) ? routeActionWithKitLabel(intelAgent) : "Route unavailable"}
+                  {canOpenSubmissionRoute(intelAgent) ? routeActionWithKitLabel(intelAgent) : "Submit unavailable"}
                 </button>
               )}
               <button className="secondary-button" type="button" onClick={() => markSent(intelAgent)}>Mark Sent</button>

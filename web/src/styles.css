@@ -592,6 +592,21 @@ a.secondary-button {
   font-weight: 800;
 }
 
+.workspace-status {
+  width: fit-content;
+  max-width: min(620px, 100%);
+  margin: 14px auto 0;
+  padding: 8px 12px;
+  border: 1px solid rgba(18, 61, 45, 0.16);
+  border-radius: 999px;
+  background: rgba(217, 229, 220, 0.28);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .main-actions {
   display: grid;
   justify-items: center;
@@ -677,6 +692,7 @@ a.secondary-button {
 .material-title,
 .material-actions,
 .kit-heading-actions,
+.portable-actions,
 .packet-tools {
   display: flex;
   align-items: center;
@@ -688,7 +704,8 @@ a.secondary-button {
 }
 
 .material-actions,
-.kit-heading-actions {
+.kit-heading-actions,
+.portable-actions {
   flex-wrap: wrap;
   justify-content: flex-end;
 }
@@ -782,6 +799,31 @@ a.secondary-button {
   cursor: pointer;
 }
 
+.file-button {
+  position: relative;
+  overflow: hidden;
+}
+
+.file-button input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.portable-kit-section {
+  background:
+    linear-gradient(135deg, rgba(217, 229, 220, 0.48), rgba(255, 255, 255, 0.82)),
+    var(--surface);
+}
+
+.portable-note {
+  max-width: 70ch;
+  margin: -4px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 .file-name {
   margin: 8px 0 0;
   color: var(--muted);
@@ -818,6 +860,10 @@ a.secondary-button {
   max-width: 58ch;
   color: var(--muted);
   line-height: 1.45;
+}
+
+.query-letter-field {
+  margin-top: 16px;
 }
 
 .packet-bar {
@@ -1160,6 +1206,28 @@ a.secondary-button {
   padding: 5px 9px;
   font-size: 12px;
   font-weight: 700;
+}
+
+.schema-requirements {
+  align-items: center;
+}
+
+.schema-requirements strong {
+  color: var(--ink);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.requirements-list .material-ready {
+  border-color: rgba(18, 183, 106, 0.28);
+  background: rgba(18, 183, 106, 0.1);
+  color: #047857;
+}
+
+.requirements-list .material-missing {
+  border-color: rgba(138, 91, 47, 0.32);
+  background: rgba(138, 91, 47, 0.08);
+  color: var(--warning);
 }
 
 .verification-note {
@@ -1672,8 +1740,16 @@ a.secondary-button {
   .sidebar-footer {
     margin-top: 0;
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 3px;
+    scrollbar-width: none;
+  }
+
+  .sidebar-section::-webkit-scrollbar,
+  .sidebar-footer::-webkit-scrollbar {
+    display: none;
   }
 
   .sidebar-footer {
@@ -1682,9 +1758,11 @@ a.secondary-button {
 
   .sidebar-item {
     width: auto;
+    flex: 0 0 auto;
     margin: 0;
     padding: 9px 10px;
     font-size: 14px;
+    white-space: nowrap;
   }
 
   .main-content {
@@ -1737,6 +1815,25 @@ a.secondary-button {
   .query-upload-card {
     display: grid;
     justify-content: stretch;
+  }
+
+  .portable-actions,
+  .kit-heading-actions,
+  .material-actions {
+    justify-content: flex-start;
+  }
+
+  .portable-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .portable-actions .secondary-button {
+    min-width: 0;
+    min-height: 42px;
+    padding: 10px;
+    text-align: center;
   }
 
   .packet-tools {
