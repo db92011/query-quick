@@ -130,7 +130,7 @@ type AgentCandidate = {
   query_method: "email" | "querytracker" | "querymanager" | "form" | "portal";
   submission_url?: string;
   public_email?: string;
-  open_status: "open" | "selective";
+  open_status: "open" | "selective" | "closed";
   source_url: string;
   source_urls?: string[];
   last_verified: string;
@@ -960,7 +960,7 @@ function sourceOnlyCandidateFromLead(
     query_method: queryMethod,
     submission_url: queryMethod === "email" ? "" : leadUrl,
     public_email: publicEmail,
-    open_status: routePageSaysClosed(sourceDoc.text) ? "selective" : "open",
+    open_status: routePageSaysClosed(sourceDoc.text) ? "closed" : "open",
     source_url: leadUrl,
     source_urls: Array.from(new Set([sourceDoc.url, leadUrl])),
     last_verified: nowIso(),
@@ -968,8 +968,9 @@ function sourceOnlyCandidateFromLead(
   };
 }
 
-async function sourceOnlySeedUrls(env: Env, body: Record<string, unknown>, limit = 10) {
+async function sourceOnlySeedUrls(env: Env, body: Record<string, unknown>, limit = 40) {
   const direct = clean(body.source_url);
+  if (validUrl(direct)) return [direct];
   const normalizedGenre = normalizeSearchText(clean(body.genre));
   const normalizedSubgenre = normalizeSearchText(clean(body.subgenre));
   const laneText = normalizeSearchText([body.genre, body.subgenre].map(clean).filter(Boolean).join(" "));
@@ -1000,7 +1001,6 @@ async function sourceOnlyDiscoveryPass(env: Env, body: Record<string, unknown>) 
   const docs = (await Promise.all(seedUrls.map(fetchSourceDocument))).filter((doc): doc is SourceDocument => Boolean(doc));
   const rawCandidates: AgentCandidate[] = [];
   for (const doc of docs) {
-    if (routePageSaysClosed(doc.text)) continue;
     const pageAgency = agencyFromSource(doc.url, doc.text, "");
     const direct = sourceOnlyCandidateFromLead(body, doc.url, "", doc, pageAgency);
     if (direct) rawCandidates.push(direct);
@@ -1024,7 +1024,7 @@ async function sourceOnlyDiscoveryPass(env: Env, body: Record<string, unknown>) 
     search_result_count: seedUrls.length,
     search_context_used: false,
     source: "source_only_validated_paths",
-  });
+  }, true);
 }
 
 async function buildGuidelineContext(agents: AgentRecord[]) {
@@ -1301,11 +1301,13 @@ function sourceCandidateList(body: Record<string, unknown>) {
     .slice(0, MAX_AGENT_POOL_RESULTS);
 }
 
-async function candidatesFromRaw(rawAgents: AgentCandidate[], diagnosticsPatch: Partial<AgentSearchDiagnostics> = {}) {
+async function candidatesFromRaw(rawAgents: AgentCandidate[], diagnosticsPatch: Partial<AgentSearchDiagnostics> = {}, keepClosed = false) {
   const candidates = rawAgents.map(candidateToAgent);
   const filtered = candidates.filter((agent) => {
     if (!agent.agent_name || !agent.agency) return false;
-    if (!["open", "selective"].includes(agent.open_status)) return false;
+    if (keepClosed) {
+      if (!["open", "selective", "closed"].includes(agent.open_status)) return false;
+    } else if (!["open", "selective"].includes(agent.open_status)) return false;
     if (Number(agent.confidence_score || 0) < 20) return false;
     if (!hasUsableAgentLead(agent)) return false;
     if (agent.query_method === "email") return validEmail(agent.public_email);
@@ -3711,13 +3713,18 @@ async function processAgentDiscoveryJob(env: Env, message: AgentEngineQueueMessa
   const now = nowIso();
   for (const agent of result.agents) {
     const saved = await saveAgentToMaster(env, body, agent, now);
+    const followupJobType: AgentEngineJobType = agent.open_status === "closed"
+      ? "open-status-refresh"
+      : agentNeedsIntel(agent)
+        ? "wishlist-extraction"
+        : "ranking-refresh";
     await enqueueAgentEngineJob(env, {
-      job_type: agentNeedsIntel(agent) ? "wishlist-extraction" : "ranking-refresh",
+      job_type: followupJobType,
       agent_id: saved.agentId,
       genre: clean(body.genre),
       subgenre: clean(body.subgenre),
       category: clean(body.category),
-      priority: agentNeedsIntel(agent) ? 76 : 55,
+      priority: agent.open_status === "closed" ? 58 : agentNeedsIntel(agent) ? 76 : 55,
       reason: "discovery-result",
     });
     await enqueueAgentEngineJob(env, {
@@ -3958,7 +3965,7 @@ async function enqueueDueOpenStatusJobs(env: Env, reason: string, limit: number)
     env.DB,
     `SELECT id, matched_genre, matched_subgenre, genre_fit
      FROM quick_agents
-     WHERE open_status IN ('open', 'selective')
+     WHERE open_status IN ('open', 'selective', 'closed')
        AND (next_refresh_at = '' OR datetime(next_refresh_at) <= datetime('now'))
      ORDER BY
        CASE WHEN open_status = 'open' THEN 0 ELSE 1 END,
@@ -3984,10 +3991,10 @@ async function enqueueMediumConfidenceJobs(env: Env) {
     env.DB,
     `SELECT id, matched_genre, matched_subgenre, genre_fit
      FROM quick_agents
-     WHERE open_status IN ('open', 'selective')
+     WHERE open_status IN ('open', 'selective', 'closed')
        AND (confidence_score BETWEEN 35 AND 74 OR refresh_status IN ('candidate', 'needs_review'))
      ORDER BY confidence_score ASC, last_seen_at DESC
-     LIMIT 50`
+     LIMIT 100`
   );
   for (const row of rows) {
     await enqueueAgentEngineJob(env, {
@@ -4089,28 +4096,28 @@ async function cleanupExpiredSnapshots(env: Env) {
 export async function handleAgentEngineScheduled(controller: ScheduledController, env: Env) {
   const cron = controller.cron;
   if (cron === "0 * * * *") {
-    await enqueueDueOpenStatusJobs(env, "hourly-open-status", 80);
+    await enqueueDueOpenStatusJobs(env, "hourly-status-sample", 80);
     await cleanupExpiredSnapshots(env);
     return;
   }
-  if (cron === "17 */6 * * *") {
+  if (cron === "17 */4 * * *") {
     await enqueueMediumConfidenceJobs(env);
-    await enqueueDueOpenStatusJobs(env, "six-hour-medium-confidence", 40);
+    await enqueueDueOpenStatusJobs(env, "four-hour-full-inventory-status", 240);
     return;
   }
   if (cron === "30 8 * * *") {
     await enqueueLowCoverageDiscoveryJobs(env);
-    await enqueueValidatedPathDiscoveryJobs(env, "daily-validated-path-refresh", 30);
+    await enqueueValidatedPathDiscoveryJobs(env, "daily-validated-path-refresh", 200);
     return;
   }
   if (cron === "45 8 * * *") {
     await enqueueAgentEngineJob(env, { job_type: "ranking-refresh", reason: "daily-ranking-recompute", priority: 65 });
-    await enqueueDueOpenStatusJobs(env, "daily-stale-agent-sweep", 120);
+    await enqueueDueOpenStatusJobs(env, "daily-stale-agent-sweep", 300);
     return;
   }
   if (cron === "0 9 * * 1") {
-    await enqueueValidatedPathDiscoveryJobs(env, "weekly-full-source-verification", 100);
-    await enqueueDueOpenStatusJobs(env, "weekly-full-status-verification", 200);
+    await enqueueValidatedPathDiscoveryJobs(env, "weekly-full-source-verification", 600);
+    await enqueueDueOpenStatusJobs(env, "weekly-full-status-verification", 900);
   }
 }
 
