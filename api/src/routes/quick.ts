@@ -3661,6 +3661,7 @@ function bodyFromQueueMessage(message: AgentEngineQueueMessage) {
     category: clean(message.category || message.payload?.category) || "adult fiction",
     tone: clean(message.tone || message.payload?.tone),
     audience: clean(message.audience || message.payload?.audience),
+    source_url: clean(message.source_url || message.payload?.source_url),
     discovery_lane: clean(message.payload?.discovery_lane),
     discovery_source: clean(message.payload?.discovery_source || message.source_url),
     discovery_focus: clean(message.payload?.discovery_focus),
