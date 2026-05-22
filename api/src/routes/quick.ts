@@ -2901,7 +2901,18 @@ async function enqueueAgentEngineJob(env: Env, message: AgentEngineQueueMessage)
     // The ledger appears after the operational migration; queue dispatch can still proceed.
   }
   const queue = queueBindingForJob(env, job.job_type);
-  if (queue) await queue.send(queuedMessage);
+  if (!queue) {
+    await markEngineJob(env, jobId, "failed", { error: `Queue binding is missing for ${queueName}.` });
+    return;
+  }
+  try {
+    await queue.send(queuedMessage);
+  } catch (error) {
+    await markEngineJob(env, jobId, "failed", {
+      error: `Queue dispatch failed: ${await errorMessage(error, "request failed")}`,
+    });
+    throw error;
+  }
 }
 
 async function enqueueSearchMaintenance(env: Env, body: Record<string, unknown>, resultCount: number) {
