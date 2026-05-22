@@ -876,7 +876,7 @@ async function fetchSourceDocument(url: string): Promise<SourceDocument | null> 
     });
     if (!liveSubmissionStatus(response.status)) return null;
     const finalUrl = response.url || url;
-    const html = await responseTextLimit(response, 60000);
+    const html = await responseTextLimit(response, 420000);
     return {
       url: finalUrl,
       html,
