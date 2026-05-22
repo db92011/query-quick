@@ -1113,6 +1113,19 @@ async function sourceOnlySeedUrls(env: Env, body: Record<string, unknown>, limit
 async function sourceOnlyDiscoveryPass(env: Env, body: Record<string, unknown>) {
   const seedUrls = await sourceOnlySeedUrls(env, body);
   const docs = (await Promise.all(seedUrls.map(fetchSourceDocument))).filter((doc): doc is SourceDocument => Boolean(doc));
+  console.log(JSON.stringify({
+    event: "source_only_documents",
+    discovery_focus: clean(body.discovery_focus),
+    seed_count: seedUrls.length,
+    doc_count: docs.length,
+    docs: docs.slice(0, 4).map((doc) => ({
+      url: doc.url.slice(0, 180),
+      html_length: doc.html.length,
+      link_count: doc.links.length,
+      has_aala_rows: doc.html.includes("dud_field_name"),
+      text_start: doc.text.slice(0, 80),
+    })),
+  }));
   const rawCandidates: AgentCandidate[] = [];
   for (const doc of docs) {
     const pageAgency = agencyFromSource(doc.url, doc.text, "");
