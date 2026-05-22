@@ -875,6 +875,49 @@ function extractLinks(html: string, baseUrl: string) {
   }).slice(0, 120);
 }
 
+function aalaRestDirectoryUrl(url: string) {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.hostname.includes("aalitagents.org") || !parsed.pathname.startsWith("/agents")) return "";
+    const restUrl = new URL("https://aalitagents.org/wp-json/wp/v2/pages/1589");
+    for (const key of ["letter", "dud_user_srch_val", "dud_user_srch_key"]) {
+      restUrl.searchParams.set(key, parsed.searchParams.get(key) || "");
+    }
+    return restUrl.toString();
+  } catch {
+    return "";
+  }
+}
+
+async function fetchAalaRestDirectoryDocument(url: string): Promise<SourceDocument | null> {
+  const restUrl = aalaRestDirectoryUrl(url);
+  if (!restUrl) return null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 7500);
+  try {
+    const response = await fetch(restUrl, {
+      method: "GET",
+      redirect: "follow",
+      signal: controller.signal,
+      headers: sourceFetchHeaders(restUrl),
+    });
+    if (!liveSubmissionStatus(response.status)) return null;
+    const data = JSON.parse(await responseTextLimit(response, 420000)) as { content?: { rendered?: string } };
+    const html = clean(data.content?.rendered) ? data.content?.rendered || "" : "";
+    if (!html || !html.includes("dud_field_name")) return null;
+    return {
+      url,
+      html,
+      text: stripHtml(html).slice(0, 6000),
+      links: extractLinks(html, url),
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function fetchSourceDocument(url: string): Promise<SourceDocument | null> {
   if (!validUrl(url)) return null;
   const controller = new AbortController();
@@ -889,6 +932,10 @@ async function fetchSourceDocument(url: string): Promise<SourceDocument | null> 
     if (!liveSubmissionStatus(response.status)) return null;
     const finalUrl = response.url || url;
     const html = await responseTextLimit(response, 420000);
+    if (aalaRestDirectoryUrl(url) && !html.includes("dud_field_name")) {
+      const restDoc = await fetchAalaRestDirectoryDocument(url);
+      if (restDoc) return restDoc;
+    }
     return {
       url: finalUrl,
       html,
