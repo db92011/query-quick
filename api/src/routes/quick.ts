@@ -220,6 +220,53 @@ const sourceReliabilityGuidance = [
 
 const genericStoredTerms = new Set(["adult", "adult fiction", "fiction", "nonfiction", "this category"]);
 
+const inventorySourceSeeds = [
+  {
+    source_type: "aala",
+    source_url: "https://aalitagents.org/agents/",
+    genre_lane: "all AALA member agents",
+    priority: 96,
+    confidence_score: 88,
+    notes: "Seeded master inventory source; AALA exposes agent names, agencies, subject focus, and open/closed submission status.",
+  },
+  {
+    source_type: "mswl",
+    source_url: "https://manuscriptwishlist.com/find-agentseditors/search/",
+    genre_lane: "all Manuscript Wish List agent/editor profiles",
+    priority: 82,
+    confidence_score: 72,
+    notes: "Seeded wishlist directory source for broad agent/profile coverage.",
+  },
+  {
+    source_type: "wordling",
+    source_url: "https://www.thewordling.com/literary-agents-us/",
+    genre_lane: "US literary agent name and agency coverage",
+    priority: 74,
+    confidence_score: 58,
+    notes: "Seeded secondary directory source for agency and agent-name coverage; verify open status elsewhere.",
+  },
+  {
+    source_type: "1000literaryagents",
+    source_url: "https://www.1000literaryagents.com/",
+    genre_lane: "broad literary agent directory coverage",
+    priority: 62,
+    confidence_score: 48,
+    notes: "Seeded secondary directory source; use only as a lead and verify against primary sources.",
+  },
+];
+
+function inventorySeedEntries() {
+  const aalaLetters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").map((letter) => ({
+    source_type: "aala",
+    source_url: `https://aalitagents.org/agents/?letter=${letter}&dud_user_srch_val=&dud_user_srch_key=`,
+    genre_lane: `AALA member agents by ${letter}`,
+    priority: 94,
+    confidence_score: 88,
+    notes: `Seeded AALA alphabetical inventory source for agents whose names begin with ${letter}.`,
+  }));
+  return [...inventorySourceSeeds, ...aalaLetters];
+}
+
 const genericAgentLinkText = new Set([
   "agent",
   "agents",
@@ -781,6 +828,7 @@ async function fetchSourceSnippet(url: string) {
 
 type SourceDocument = {
   url: string;
+  html: string;
   text: string;
   links: Array<{ text: string; url: string }>;
 };
@@ -831,6 +879,7 @@ async function fetchSourceDocument(url: string): Promise<SourceDocument | null> 
     const html = await responseTextLimit(response, 60000);
     return {
       url: finalUrl,
+      html,
       text: stripHtml(html).slice(0, 6000),
       links: extractLinks(html, finalUrl),
     };
@@ -932,6 +981,57 @@ function emailFromText(value: string) {
   return value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || "";
 }
 
+function sourceFocusMatchesRequest(focus: string, body: Record<string, unknown>) {
+  const requestTerms = [
+    clean(body.genre),
+    clean(body.subgenre),
+    clean(body.category),
+    ...genreExpansionTerms(body),
+  ]
+    .flatMap((term) => normalizeSearchText(term).split(/[\/,;|]+/))
+    .map((term) => term.trim())
+    .filter((term) => term && !genericStoredTerms.has(term));
+  if (!requestTerms.length) return true;
+  const normalizedFocus = normalizeSearchText(focus);
+  return requestTerms.some((term) => normalizedFocus.includes(term));
+}
+
+function extractAalaDirectoryCandidates(body: Record<string, unknown>, doc: SourceDocument): AgentCandidate[] {
+  if (!doc.url.toLowerCase().includes("aalitagents.org/agents")) return [];
+  const candidates: AgentCandidate[] = [];
+  const entryPattern = /class=['"]dud_field_name['"][\s\S]*?<b>([\s\S]*?)<\/b>[\s\S]*?class=['"]dud_field_1['"]>([\s\S]*?)<\/span>[\s\S]*?class=['"]dud_field_2['"]>([\s\S]*?)<\/span>[\s\S]*?class=['"]dud_field_3['"]>([\s\S]*?)<\/span>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = entryPattern.exec(doc.html)) !== null) {
+    const agentName = looksLikePersonName(stripHtml(match[1]));
+    const agency = clean(stripHtml(match[2]));
+    const focus = clean(stripHtml(match[3]));
+    const openStatus = clean(match[4]).toLowerCase() === "open" ? "open" : "closed";
+    if (!agentName || !agency || !focus) continue;
+    if (!sourceFocusMatchesRequest(focus, body)) continue;
+    candidates.push({
+      agent_name: agentName,
+      agency,
+      genre_fit: focus.slice(0, 500),
+      matched_genre: clean(body.genre) || focus.split(/\s+/).slice(0, 4).join(" "),
+      matched_subgenre: clean(body.subgenre),
+      genre_evidence: `AALA subject focus lists: ${focus.slice(0, 220)}.`,
+      subgenre_evidence: clean(body.subgenre)
+        ? `AALA directory row is being inventoried for the ${clean(body.subgenre)} lane.`
+        : "AALA directory row is being inventoried for all matching subject-focus lanes.",
+      fit_reason: `AALA directory lists ${agentName} at ${agency} with public submission status ${openStatus}.`,
+      query_method: "portal",
+      submission_url: doc.url,
+      public_email: "",
+      open_status: openStatus,
+      source_url: doc.url,
+      source_urls: [doc.url],
+      last_verified: nowIso(),
+      confidence_score: openStatus === "open" ? 72 : 64,
+    });
+  }
+  return candidates;
+}
+
 function sourceOnlyCandidateFromLead(
   body: Record<string, unknown>,
   leadUrl: string,
@@ -1002,6 +1102,7 @@ async function sourceOnlyDiscoveryPass(env: Env, body: Record<string, unknown>) 
   const rawCandidates: AgentCandidate[] = [];
   for (const doc of docs) {
     const pageAgency = agencyFromSource(doc.url, doc.text, "");
+    rawCandidates.push(...extractAalaDirectoryCandidates(body, doc));
     const direct = sourceOnlyCandidateFromLead(body, doc.url, "", doc, pageAgency);
     if (direct) rawCandidates.push(direct);
     for (const link of doc.links) {
@@ -2448,6 +2549,42 @@ function pathKeyFromUrl(value: string) {
     return [host, ...parts].join("/");
   } catch {
     return normalizeSearchText(value).slice(0, 140) || "unknown-path";
+  }
+}
+
+async function ensureInventorySourceSeeds(env: Env) {
+  const now = nowIso();
+  for (const seed of inventorySeedEntries()) {
+    const pathKey = pathKeyFromUrl(seed.source_url);
+    await run(
+      env.DB,
+      `INSERT INTO quick_validated_agent_paths (
+         id, source_type, path_key, source_url, genre_lane, normalized_genre,
+         normalized_subgenre, status, priority, useful_agent_count, open_agent_yield,
+         false_positive_count, last_agent_id, last_useful_at, next_check_at,
+         confidence_score, notes, created_at, updated_at
+       )
+       VALUES (?1, ?2, ?3, ?4, ?5, '', '', 'watching', ?6, 0, 0, 0, '', '', '', ?7, ?8, ?9, ?10)
+       ON CONFLICT(path_key, normalized_genre, normalized_subgenre) DO UPDATE SET
+         source_url = excluded.source_url,
+         status = 'watching',
+         priority = max(priority, excluded.priority),
+         confidence_score = max(confidence_score, excluded.confidence_score),
+         notes = excluded.notes,
+         updated_at = excluded.updated_at`,
+      [
+        crypto.randomUUID(),
+        seed.source_type,
+        pathKey,
+        seed.source_url,
+        seed.genre_lane,
+        seed.priority,
+        seed.confidence_score,
+        seed.notes,
+        now,
+        now,
+      ]
+    );
   }
 }
 
@@ -4106,6 +4243,7 @@ export async function handleAgentEngineScheduled(controller: ScheduledController
     return;
   }
   if (cron === "30 8 * * *") {
+    await ensureInventorySourceSeeds(env);
     await enqueueLowCoverageDiscoveryJobs(env);
     await enqueueValidatedPathDiscoveryJobs(env, "daily-validated-path-refresh", 200);
     return;
@@ -4116,6 +4254,7 @@ export async function handleAgentEngineScheduled(controller: ScheduledController
     return;
   }
   if (cron === "0 9 * * 1") {
+    await ensureInventorySourceSeeds(env);
     await enqueueValidatedPathDiscoveryJobs(env, "weekly-full-source-verification", 600);
     await enqueueDueOpenStatusJobs(env, "weekly-full-status-verification", 900);
   }
