@@ -783,6 +783,24 @@ function stripHtml(value: string) {
     .trim();
 }
 
+function sourceFetchHeaders(url: string) {
+  const headers: Record<string, string> = {
+    accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.6",
+    "accept-language": "en-US,en;q=0.9",
+    "cache-control": "no-cache",
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 QueryQuick/1.0 (+https://querysalon.com)",
+  };
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname.includes("aalitagents.org")) {
+      headers.referer = "https://aalitagents.org/agents/";
+    }
+  } catch {
+    // Invalid URLs are rejected before fetch.
+  }
+  return headers;
+}
+
 async function responseTextLimit(response: Response, maxChars: number) {
   const reader = response.body?.getReader();
   if (!reader) return (await response.text()).slice(0, maxChars);
@@ -811,10 +829,7 @@ async function fetchSourceSnippet(url: string) {
       method: "GET",
       redirect: "follow",
       signal: controller.signal,
-      headers: {
-        accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.6",
-        "user-agent": "QueryQuickBot/1.0 (+https://querysalon.com)",
-      },
+      headers: sourceFetchHeaders(url),
     });
     if (!liveSubmissionStatus(response.status)) return "";
     const text = stripHtml(await responseTextLimit(response, 24000));
@@ -869,10 +884,7 @@ async function fetchSourceDocument(url: string): Promise<SourceDocument | null> 
       method: "GET",
       redirect: "follow",
       signal: controller.signal,
-      headers: {
-        accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.6",
-        "user-agent": "QueryQuickBot/1.0 (+https://querysalon.com)",
-      },
+      headers: sourceFetchHeaders(url),
     });
     if (!liveSubmissionStatus(response.status)) return null;
     const finalUrl = response.url || url;
@@ -3855,6 +3867,17 @@ async function processAgentDiscoveryJob(env: Env, message: AgentEngineQueueMessa
   const body = bodyFromQueueMessage(message);
   const result = await generateLiveCandidatePoolForResponse(env, body, EMPTY_POOL_DISCOVERY_BUDGET_MS);
   const now = nowIso();
+  console.log(JSON.stringify({
+    event: "agent_discovery_result",
+    job_id: clean(message.job_id),
+    reason: clean(message.reason),
+    source_url: clean(body.source_url),
+    raw_count: result.diagnostics.raw_count,
+    candidate_count: result.diagnostics.candidate_count,
+    verified_count: result.diagnostics.verified_count,
+    stored_count: result.agents.length,
+    source: result.diagnostics.source || "",
+  }));
   for (const agent of result.agents) {
     const saved = await saveAgentToMaster(env, body, agent, now);
     const followupJobType: AgentEngineJobType = agent.open_status === "closed"
