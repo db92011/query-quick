@@ -982,6 +982,7 @@ function emailFromText(value: string) {
 }
 
 function sourceFocusMatchesRequest(focus: string, body: Record<string, unknown>) {
+  if (clean(body.inventory_scope) === "all") return true;
   const requestTerms = [
     clean(body.genre),
     clean(body.subgenre),
@@ -3503,6 +3504,7 @@ export async function handleAgentDiscover(request: Request, env: Env, ctx?: Exec
         discovery_source: clean(body.discovery_source) || clean(body.source_url),
         discovery_focus: discoveryFocus,
         source_url: clean(body.source_url),
+        inventory_scope: clean(body.inventory_scope),
         expanded_genres: Array.isArray(body.expanded_genres) ? body.expanded_genres : genreExpansionTerms(body),
         include_stored_pool: false,
         exclude_agents: Array.isArray(body.exclude_agents) ? body.exclude_agents : [],
@@ -3667,6 +3669,7 @@ function bodyFromQueueMessage(message: AgentEngineQueueMessage) {
     discovery_lane: clean(message.payload?.discovery_lane),
     discovery_source: clean(message.payload?.discovery_source || message.source_url),
     discovery_focus: clean(message.payload?.discovery_focus),
+    inventory_scope: clean(message.payload?.inventory_scope),
     expanded_genres: Array.isArray(message.payload?.expanded_genres) ? message.payload?.expanded_genres : undefined,
     exclude_agents: Array.isArray(message.payload?.exclude_agents) ? message.payload?.exclude_agents : [],
     include_stored_pool: false,
