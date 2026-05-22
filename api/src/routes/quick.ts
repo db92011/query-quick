@@ -1000,6 +1000,7 @@ function sourceFocusMatchesRequest(focus: string, body: Record<string, unknown>)
 function extractAalaDirectoryCandidates(body: Record<string, unknown>, doc: SourceDocument): AgentCandidate[] {
   if (!doc.url.toLowerCase().includes("aalitagents.org/agents")) return [];
   const candidates: AgentCandidate[] = [];
+  const inventoryWide = clean(body.inventory_scope) === "all";
   const entryPattern = /class=['"]dud_field_name['"][\s\S]*?<b>([\s\S]*?)<\/b>[\s\S]*?class=['"]dud_field_1['"]>([\s\S]*?)<\/span>[\s\S]*?class=['"]dud_field_2['"]>([\s\S]*?)<\/span>[\s\S]*?class=['"]dud_field_3['"]>([\s\S]*?)<\/span>/gi;
   let match: RegExpExecArray | null;
   while ((match = entryPattern.exec(doc.html)) !== null) {
@@ -1013,10 +1014,10 @@ function extractAalaDirectoryCandidates(body: Record<string, unknown>, doc: Sour
       agent_name: agentName,
       agency,
       genre_fit: focus.slice(0, 500),
-      matched_genre: clean(body.genre) || focus.split(/\s+/).slice(0, 4).join(" "),
-      matched_subgenre: clean(body.subgenre),
+      matched_genre: inventoryWide ? focus.split(/\s+/).slice(0, 4).join(" ") : clean(body.genre) || focus.split(/\s+/).slice(0, 4).join(" "),
+      matched_subgenre: inventoryWide ? "" : clean(body.subgenre),
       genre_evidence: `AALA subject focus lists: ${focus.slice(0, 220)}.`,
-      subgenre_evidence: clean(body.subgenre)
+      subgenre_evidence: !inventoryWide && clean(body.subgenre)
         ? `AALA directory row is being inventoried for the ${clean(body.subgenre)} lane.`
         : "AALA directory row is being inventoried for all matching subject-focus lanes.",
       fit_reason: `AALA directory lists ${agentName} at ${agency} with public submission status ${openStatus}.`,
