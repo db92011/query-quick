@@ -3235,7 +3235,12 @@ async function upsertWishlistVector(env: Env, agentId: string, agent: AgentRecor
   if (!env.WISHLIST_INDEX || !env.OPENAI_API_KEY) return;
   const text = wishlistSummaryForAgent(agent);
   if (!text) return;
-  const embedding = await openAiEmbedding(env, text);
+  let embedding: number[] | null = null;
+  try {
+    embedding = await openAiEmbedding(env, text);
+  } catch {
+    return;
+  }
   if (!embedding) return;
   const contentHash = await hashText(text);
   await env.WISHLIST_INDEX.upsert([{
