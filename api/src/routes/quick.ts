@@ -3275,6 +3275,75 @@ async function upsertWishlistVector(env: Env, agentId: string, agent: AgentRecor
   }
 }
 
+function materialLabel(material: NonNullable<AgentRecord["required_materials"]>[number]) {
+  const labels: Record<string, string> = {
+    query_letter: "query letter",
+    concise_description: "concise description",
+    synopsis: "synopsis",
+    first_pages: "first pages",
+    sample_chapters: "sample chapters",
+    proposal: "proposal",
+    logline: "logline",
+    short_pitch: "short pitch",
+    bio_paragraph: "bio",
+    publishing_history: "publishing history",
+    comps: "comp titles",
+    trigger_warnings: "content warnings",
+    inspiration: "inspiration note",
+    more_about_you: "author background",
+    prizes: "awards/prizes",
+  };
+  return labels[material] || material.replace(/_/g, " ");
+}
+
+async function deterministicRequirementAgent(agent: AgentRecord) {
+  const urls = Array.from(new Set([
+    agent.source_url,
+    submissionRouteUrl(agent),
+    ...(agent.source_urls || []),
+  ].map(clean).filter(validUrl))).slice(0, 4);
+  const snippets = await Promise.all(urls.map(async (url) => ({ url, text: await fetchSourceSnippet(url) })));
+  const usable = snippets.filter((snippet) => snippet.text);
+  if (!usable.length) return agent;
+
+  const sourceText = usable.map((snippet) => snippet.text).join("\n\n");
+  const requiredMaterials = inferRequiredMaterials(sourceText);
+  const samplePages = inferSamplePageCount(sourceText);
+  const synopsisType = inferSynopsisType(sourceText);
+  const materialSummary = requiredMaterials.map(materialLabel).join(", ");
+  const summary = [
+    `${agent.agency} source guidelines were checked for ${agent.agent_name}.`,
+    `Required materials detected: ${materialSummary || "query letter"}.`,
+    samplePages ? `Sample requirement detected: first ${samplePages} pages.` : "",
+    synopsisType ? `Synopsis requirement detected: ${synopsisType.replace(/_/g, " ")} synopsis.` : "",
+    `Submission route: ${agent.query_method} via ${submissionRouteUrl(agent)}.`,
+  ].filter(Boolean).join(" ");
+
+  return normalizeAgent({
+    ...agent,
+    requirements_summary: summary,
+    required_materials: requiredMaterials,
+    submission_requirements: {
+      required_materials: requiredMaterials,
+      sample_pages: samplePages,
+      synopsis_type: synopsisType,
+      source_urls: usable.map((snippet) => snippet.url),
+      extraction: "deterministic_source_text",
+    },
+    email_opener: agent.email_opener || `I am querying because your public wishlist and submission profile appear aligned with ${agent.matched_genre || agent.genre_fit}. My project fits the ${agent.matched_subgenre || "listed"} lane and I have followed the materials requested in your current guidelines.`,
+    verification_notes: [
+      clean(agent.verification_notes),
+      `Deterministic source-text extraction checked ${usable.map((snippet) => snippet.url).join(", ")}.`,
+    ].filter(Boolean).join(" "),
+    source_urls: Array.from(new Set([
+      agent.source_url,
+      submissionRouteUrl(agent),
+      ...(agent.source_urls || []),
+      ...usable.map((snippet) => snippet.url),
+    ].map(clean).filter(Boolean))),
+  });
+}
+
 async function processAgentDiscoveryJob(env: Env, message: AgentEngineQueueMessage) {
   const body = bodyFromQueueMessage(message);
   const result = await generateLiveCandidatePoolForResponse(env, body, EMPTY_POOL_DISCOVERY_BUDGET_MS);
@@ -3367,7 +3436,8 @@ async function processWishlistExtractionJob(env: Env, message: AgentEngineQueueM
     candidates: [agent],
   };
   const enriched = await generateAgents(env, body);
-  const next = enriched.agents[0] || agent;
+  let next = enriched.agents[0] || agent;
+  if (agentNeedsIntel(next)) next = await deterministicRequirementAgent(next);
   await saveAgentToMaster(env, body, next, nowIso());
   await captureAgentSnapshots(env, agentId, next);
   await upsertWishlistVector(env, agentId, next);
