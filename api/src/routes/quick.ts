@@ -1398,18 +1398,21 @@ function queuedDiscoveryLanes(body: Record<string, unknown>, resultCount: number
 }
 
 async function generateDiscoveryPass(env: Env, body: Record<string, unknown>) {
-  const providers: Array<Promise<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>> = [];
-  if (env.OPENAI_API_KEY) providers.push(generateAgentCandidates(env, body));
-  if (env.GEMINI_API_KEY) providers.push(generateGeminiCandidates(env, body));
-  if (env.ANTHROPIC_API_KEY) providers.push(generateClaudeCandidates(env, body));
+  const providers: Array<{ name: string; run: Promise<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }> }> = [];
+  if (env.OPENAI_API_KEY) providers.push({ name: "OpenAI", run: generateAgentCandidates(env, body) });
+  if (env.GEMINI_API_KEY) providers.push({ name: "Gemini", run: generateGeminiCandidates(env, body) });
+  if (env.ANTHROPIC_API_KEY) providers.push({ name: "Claude", run: generateClaudeCandidates(env, body) });
   if (!providers.length) throw badRequest("Agent discovery is not configured. Add at least one AI provider key.", 503);
 
-  const results = await Promise.allSettled(providers);
+  const results = await Promise.allSettled(providers.map((provider) => provider.run));
   const fulfilled = results
     .filter((result): result is PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }> => result.status === "fulfilled");
   if (!fulfilled.length) {
-    const firstError = results.find((result): result is PromiseRejectedResult => result.status === "rejected")?.reason;
-    throw firstError instanceof Response ? firstError : badRequest(firstError instanceof Error ? firstError.message : "All discovery providers failed.", 502);
+    const errors = await Promise.all(results.map(async (result, index) => {
+      if (result.status === "fulfilled") return "";
+      return `${providers[index]?.name || "provider"}: ${await errorMessage(result.reason, "request failed")}`;
+    }));
+    throw badRequest(`All discovery providers failed. ${errors.filter(Boolean).join(" | ")}`, 502);
   }
   return fulfilled;
 }
