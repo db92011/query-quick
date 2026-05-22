@@ -3453,8 +3453,13 @@ async function processWishlistExtractionJob(env: Env, message: AgentEngineQueueM
     category: clean(message.category) || "adult fiction",
     candidates: [agent],
   };
-  const enriched = await generateAgents(env, body);
-  let next = enriched.agents[0] || agent;
+  let next = agent;
+  try {
+    const enriched = await generateAgents(env, body);
+    next = enriched.agents[0] || agent;
+  } catch {
+    next = agent;
+  }
   if (agentNeedsIntel(next)) next = await deterministicRequirementAgent(next);
   await saveAgentToMaster(env, body, next, nowIso());
   await captureAgentSnapshots(env, agentId, next);
