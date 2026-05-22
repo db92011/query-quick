@@ -652,6 +652,14 @@ function routePageSaysClosed(value: string) {
 async function verifySubmissionRouteResult(agent: AgentRecord): Promise<RouteVerificationResult> {
   const routeUrl = submissionRouteUrl(agent);
   if (!validUrl(routeUrl)) return { agent: null, status: 0, notes: "Submission route URL is missing or invalid.", closed: false };
+  if (sourceUrlIsDirectoryLead(routeUrl)) {
+    return {
+      agent: null,
+      status: 0,
+      notes: "Directory inventory lead only; exact agent submission route still needs a primary source.",
+      closed: false,
+    };
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
   try {
@@ -1023,6 +1031,20 @@ function queryMethodFromSourceUrl(url: string, pageText = ""): AgentRecord["quer
   return "portal";
 }
 
+function sourceUrlIsDirectoryLead(url: string) {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+    const path = parsed.pathname.toLowerCase();
+    if (host.includes("thewordling.com") && path.includes("literary-agents")) return true;
+    if (host.includes("1000literaryagents.com") && path === "/") return true;
+    if (host.includes("aalitagents.org") && path === "/agents/") return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function sourceUrlLooksAgentLike(url: string) {
   const lower = url.toLowerCase();
   return [
@@ -1089,6 +1111,47 @@ function extractAalaDirectoryCandidates(body: Record<string, unknown>, doc: Sour
       last_verified: nowIso(),
       confidence_score: openStatus === "open" ? 72 : 64,
     });
+  }
+  return candidates;
+}
+
+function extractWordlingDirectoryCandidates(body: Record<string, unknown>, doc: SourceDocument): AgentCandidate[] {
+  try {
+    const parsed = new URL(doc.url);
+    if (!parsed.hostname.includes("thewordling.com") || !parsed.pathname.includes("literary-agents")) return [];
+  } catch {
+    return [];
+  }
+  const candidates: AgentCandidate[] = [];
+  const sectionPattern = /<h3\b[^>]*>([\s\S]*?)<\/h3>\s*<ul\b[^>]*>([\s\S]*?)<\/ul>/gi;
+  let section: RegExpExecArray | null;
+  while ((section = sectionPattern.exec(doc.html)) !== null) {
+    const agency = clean(stripHtml(section[1]));
+    if (!agency || agency.length > 120) continue;
+    const itemPattern = /<li\b[^>]*>([\s\S]*?)<\/li>/gi;
+    let item: RegExpExecArray | null;
+    while ((item = itemPattern.exec(section[2])) !== null) {
+      const agentName = looksLikePersonName(stripHtml(item[1]));
+      if (!agentName) continue;
+      candidates.push({
+        agent_name: agentName,
+        agency: titleCaseFromSlug(agency.toLowerCase()),
+        genre_fit: "Master literary-agent inventory lead from a public agency list.",
+        matched_genre: clean(body.inventory_scope) === "all" ? "master inventory" : clean(body.genre),
+        matched_subgenre: clean(body.inventory_scope) === "all" ? "" : clean(body.subgenre),
+        genre_evidence: "The Wordling public US literary-agent list names this agent under the agency heading.",
+        subgenre_evidence: "Specific genres and submission requirements must be verified from primary agency or agent sources.",
+        fit_reason: `${agentName} is listed under ${agency} on The Wordling's public literary-agent inventory.`,
+        query_method: "portal",
+        submission_url: "",
+        public_email: "",
+        open_status: "closed",
+        source_url: doc.url,
+        source_urls: [doc.url],
+        last_verified: nowIso(),
+        confidence_score: 42,
+      });
+    }
   }
   return candidates;
 }
@@ -1177,6 +1240,7 @@ async function sourceOnlyDiscoveryPass(env: Env, body: Record<string, unknown>) 
   for (const doc of docs) {
     const pageAgency = agencyFromSource(doc.url, doc.text, "");
     rawCandidates.push(...extractAalaDirectoryCandidates(body, doc));
+    rawCandidates.push(...extractWordlingDirectoryCandidates(body, doc));
     const direct = sourceOnlyCandidateFromLead(body, doc.url, "", doc, pageAgency);
     if (direct) rawCandidates.push(direct);
     for (const link of doc.links) {
