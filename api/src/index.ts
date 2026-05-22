@@ -4,6 +4,7 @@ import { handleQuickAuth } from "./routes/quick-auth";
 import {
   type AgentEngineQueueMessage,
   handleAgentDiscover,
+  handleAgentIntelBackfill,
   handleAgentEngineQueue,
   handleAgentEngineScheduled,
   handleAgentSearch,
@@ -99,6 +100,8 @@ export default {
         response = await handleAgentSearch(request, env, ctx);
       } else if (url.pathname === "/api/agents/discover") {
         response = await handleAgentDiscover(request, env, ctx);
+      } else if (url.pathname === "/api/agents/refresh-intel") {
+        response = await handleAgentIntelBackfill(request, env);
       } else if (url.pathname === "/api/profile") {
         response = await handleQuickProfile(request, env);
       } else if (url.pathname === "/api/submission-kit/file") {

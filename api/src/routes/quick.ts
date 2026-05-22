@@ -3052,6 +3052,38 @@ export async function handleAgentDiscover(request: Request, env: Env, ctx?: Exec
   });
 }
 
+export async function handleAgentIntelBackfill(request: Request, env: Env) {
+  if (request.method !== "POST") return badRequest("Method not allowed.", 405);
+  await requireSession(request, env);
+  const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+  const limit = Math.max(1, Math.min(25, Number(body.limit || 6)));
+  const rows = await all<{ id: string; matched_genre: string; matched_subgenre: string; genre_fit: string }>(
+    env.DB,
+    `SELECT id, matched_genre, matched_subgenre, genre_fit
+     FROM quick_agents
+     WHERE open_status = 'open'
+       AND (
+         requirements_summary = 'Building Agent Intel...'
+         OR email_opener = ''
+         OR required_materials_json = '["query_letter"]'
+       )
+     ORDER BY last_seen_at DESC, confidence_score DESC
+     LIMIT ?1`,
+    [limit]
+  );
+  for (const row of rows) {
+    await enqueueAgentEngineJob(env, {
+      job_type: "wishlist-extraction",
+      agent_id: row.id,
+      genre: row.matched_genre || row.genre_fit,
+      subgenre: row.matched_subgenre || "",
+      reason: "manual-existing-agent-intel-workers-ai",
+      priority: 88,
+    });
+  }
+  return json({ ok: true, queued: rows.length });
+}
+
 async function markEngineJob(env: Env, jobId: string | undefined, status: string, patch: Record<string, unknown> = {}) {
   if (!jobId) return;
   const now = nowIso();
