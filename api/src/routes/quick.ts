@@ -1496,7 +1496,9 @@ async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>
     };
     if (!snippets.length) {
       if (baseResult.length) return baseResult.map((providerResult) => withSearchDiagnostics(providerResult, false));
-      throw baseError instanceof Response ? baseError : badRequest(baseError instanceof Error ? baseError.message : "Discovery did not return source leads.", 502);
+      const providerError = await errorMessage(baseError, "Discovery did not return source leads.");
+      const sourceError = searchProviderErrors.length ? ` Source search failed or returned no usable leads: ${searchProviderErrors.join(" | ")}` : " Source search returned no usable leads.";
+      throw badRequest(`${providerError}${sourceError}`, 502);
     }
     let searchResult: Array<PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>> = [];
     try {
