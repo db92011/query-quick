@@ -178,7 +178,7 @@ const TARGET_AGENT_POOL_SIZE = 337;
 const DISCOVERY_PROVIDER_TIMEOUT_MS = 30000;
 const SEARCH_PROVIDER_TIMEOUT_MS = 12000;
 const STORED_POOL_DISCOVERY_BUDGET_MS = 18000;
-const EMPTY_POOL_DISCOVERY_BUDGET_MS = 70000;
+const EMPTY_POOL_DISCOVERY_BUDGET_MS = 22000;
 const SEARCH_RESULTS_PER_PROVIDER = 8;
 const INSTANT_SEARCH_LIMIT = 50;
 const SNAPSHOT_RETENTION_DAYS = 14;
@@ -1376,6 +1376,25 @@ function discoveryLanes(body: Record<string, unknown>): DiscoveryLane[] {
     { id: "google", source: "Google Programmable Search source snippets", focus: `Google search pass for additional ${category} ${genre} literary agents accepting ${subgenre}; prioritize profile, guideline, and directory pages not already found` },
     { id: "bing", source: "Bing Web Search source snippets", focus: `Bing search pass for additional ${category} ${genre} literary agents accepting ${subgenre}; prioritize profile, guideline, and directory pages not already found` },
   ];
+}
+
+function queuedDiscoveryLanes(body: Record<string, unknown>, resultCount: number) {
+  const priorityIds = [
+    "aala",
+    "querymanager",
+    "mswl",
+    "agency",
+    "newer-agents",
+    "querytracker",
+    "boutique",
+    "broad",
+  ];
+  const laneCount = resultCount === 0 ? 6 : resultCount < 10 ? 4 : 2;
+  const lanes = discoveryLanes(body);
+  return priorityIds
+    .map((id) => lanes.find((lane) => lane.id === id))
+    .filter((lane): lane is DiscoveryLane => Boolean(lane))
+    .slice(0, laneCount);
 }
 
 async function generateDiscoveryPass(env: Env, body: Record<string, unknown>) {
@@ -2826,20 +2845,25 @@ async function enqueueSearchMaintenance(env: Env, body: Record<string, unknown>,
   const category = clean(body.category) || "adult fiction";
   const priority = resultCount < 10 ? 92 : resultCount < 25 ? 72 : 45;
   if (resultCount < 25) {
-    await enqueueAgentEngineJob(env, {
-      job_type: "agent-discovery",
-      genre,
-      subgenre,
-      category,
-      tone: clean(body.tone),
-      audience: clean(body.audience),
-      priority,
-      reason: resultCount ? "search-low-coverage" : "search-empty-lane",
-      payload: {
-        include_stored_pool: false,
-        expanded_genres: genreExpansionTerms(body),
-      },
-    });
+    for (const lane of queuedDiscoveryLanes(body, resultCount)) {
+      await enqueueAgentEngineJob(env, {
+        job_type: "agent-discovery",
+        genre,
+        subgenre,
+        category,
+        tone: clean(body.tone),
+        audience: clean(body.audience),
+        priority,
+        reason: resultCount ? `search-low-coverage:${lane.id}` : `search-empty-lane:${lane.id}`,
+        payload: {
+          include_stored_pool: false,
+          expanded_genres: genreExpansionTerms(body),
+          discovery_lane: lane.id,
+          discovery_source: lane.source,
+          discovery_focus: lane.focus,
+        },
+      });
+    }
   }
   await enqueueAgentEngineJob(env, {
     job_type: "ranking-refresh",
@@ -2892,24 +2916,45 @@ export async function handleAgentDiscover(request: Request, env: Env, ctx?: Exec
   const seenKeys = await userSeenAgentKeys(env, session.user.id);
   const agents = markSeenBefore(dedupeAgents(await instantOpenAgentSearch(env, body)), seenKeys);
   await recordInstantAgentSearch(env, session.user.id, key, body, agents);
-  const discovery = enqueueAgentEngineJob(env, {
-    job_type: "agent-discovery",
-    genre: clean(body.genre),
-    subgenre: clean(body.subgenre),
-    category: clean(body.category),
-    tone: clean(body.tone),
-    audience: clean(body.audience),
-    reason: clean(body.discovery_focus) || "manual-background-discovery",
-    priority: Number(body.priority || 75),
-    payload: {
-      discovery_lane: clean(body.discovery_lane),
-      discovery_source: clean(body.discovery_source),
-      discovery_focus: clean(body.discovery_focus),
-      expanded_genres: Array.isArray(body.expanded_genres) ? body.expanded_genres : genreExpansionTerms(body),
-      include_stored_pool: false,
-      exclude_agents: Array.isArray(body.exclude_agents) ? body.exclude_agents : [],
-    },
-  });
+  const discoveryFocus = clean(body.discovery_focus);
+  const discoveryJobs = discoveryFocus
+    ? [enqueueAgentEngineJob(env, {
+      job_type: "agent-discovery",
+      genre: clean(body.genre),
+      subgenre: clean(body.subgenre),
+      category: clean(body.category),
+      tone: clean(body.tone),
+      audience: clean(body.audience),
+      reason: discoveryFocus,
+      priority: Number(body.priority || 75),
+      payload: {
+        discovery_lane: clean(body.discovery_lane),
+        discovery_source: clean(body.discovery_source),
+        discovery_focus: discoveryFocus,
+        expanded_genres: Array.isArray(body.expanded_genres) ? body.expanded_genres : genreExpansionTerms(body),
+        include_stored_pool: false,
+        exclude_agents: Array.isArray(body.exclude_agents) ? body.exclude_agents : [],
+      },
+    })]
+    : queuedDiscoveryLanes(body, agents.length).map((lane) => enqueueAgentEngineJob(env, {
+      job_type: "agent-discovery",
+      genre: clean(body.genre),
+      subgenre: clean(body.subgenre),
+      category: clean(body.category),
+      tone: clean(body.tone),
+      audience: clean(body.audience),
+      reason: `manual-background-discovery:${lane.id}`,
+      priority: Number(body.priority || 75),
+      payload: {
+        discovery_lane: lane.id,
+        discovery_source: lane.source,
+        discovery_focus: lane.focus,
+        expanded_genres: Array.isArray(body.expanded_genres) ? body.expanded_genres : genreExpansionTerms(body),
+        include_stored_pool: false,
+        exclude_agents: Array.isArray(body.exclude_agents) ? body.exclude_agents : [],
+      },
+    }));
+  const discovery = Promise.all(discoveryJobs);
   if (ctx) {
     ctx.waitUntil(discovery);
   } else {
@@ -3012,7 +3057,7 @@ function bodyFromQueueMessage(message: AgentEngineQueueMessage) {
     audience: clean(message.audience || message.payload?.audience),
     discovery_lane: clean(message.payload?.discovery_lane),
     discovery_source: clean(message.payload?.discovery_source || message.source_url),
-    discovery_focus: clean(message.payload?.discovery_focus || message.reason),
+    discovery_focus: clean(message.payload?.discovery_focus),
     expanded_genres: Array.isArray(message.payload?.expanded_genres) ? message.payload?.expanded_genres : undefined,
     exclude_agents: Array.isArray(message.payload?.exclude_agents) ? message.payload?.exclude_agents : [],
     include_stored_pool: false,
@@ -3440,14 +3485,27 @@ async function enqueueLowCoverageDiscoveryJobs(env: Env) {
      LIMIT 20`
   );
   for (const row of rows) {
-    await enqueueAgentEngineJob(env, {
-      job_type: "agent-discovery",
+    const laneBody = {
       genre: row.genre,
       subgenre: row.subgenre,
       category: row.category,
-      reason: "recent-search-low-coverage",
-      priority: row.result_count < 5 ? 90 : 72,
-    });
+    };
+    for (const lane of queuedDiscoveryLanes(laneBody, Number(row.result_count || 0)).slice(0, 3)) {
+      await enqueueAgentEngineJob(env, {
+        job_type: "agent-discovery",
+        genre: row.genre,
+        subgenre: row.subgenre,
+        category: row.category,
+        reason: `recent-search-low-coverage:${lane.id}`,
+        priority: row.result_count < 5 ? 90 : 72,
+        payload: {
+          discovery_lane: lane.id,
+          discovery_source: lane.source,
+          discovery_focus: lane.focus,
+          expanded_genres: genreExpansionTerms(laneBody),
+        },
+      });
+    }
   }
 }
 
