@@ -24,6 +24,9 @@ type Env = {
   GOOGLE_SEARCH_CX?: string;
   BING_SEARCH_API_KEY?: string;
   BING_SEARCH_ENDPOINT?: string;
+  ALLOW_PROVIDER_DISCOVERY?: string;
+  ALLOW_PROVIDER_ENRICHMENT?: string;
+  ALLOW_PROVIDER_EMBEDDINGS?: string;
 };
 
 export type AgentEngineJobType =
@@ -217,6 +220,25 @@ const sourceReliabilityGuidance = [
 
 const genericStoredTerms = new Set(["adult", "adult fiction", "fiction", "nonfiction", "this category"]);
 
+const genericAgentLinkText = new Set([
+  "agent",
+  "agents",
+  "author",
+  "authors",
+  "bio",
+  "contact",
+  "home",
+  "learn more",
+  "more",
+  "profile",
+  "read more",
+  "representation",
+  "submit",
+  "submission",
+  "submissions",
+  "website",
+]);
+
 const allowedFileKinds = new Set([
   "query_letter",
   "concise_description",
@@ -237,6 +259,22 @@ const allowedFileKinds = new Set([
 
 function clean(value: unknown) {
   return String(value || "").trim();
+}
+
+function featureFlagEnabled(value: unknown) {
+  return ["1", "true", "yes", "on"].includes(clean(value).toLowerCase());
+}
+
+function providerDiscoveryEnabled(env: Env) {
+  return featureFlagEnabled(env.ALLOW_PROVIDER_DISCOVERY);
+}
+
+function providerEnrichmentEnabled(env: Env) {
+  return featureFlagEnabled(env.ALLOW_PROVIDER_ENRICHMENT);
+}
+
+function providerEmbeddingsEnabled(env: Env) {
+  return featureFlagEnabled(env.ALLOW_PROVIDER_EMBEDDINGS);
 }
 
 function nowIso() {
@@ -698,6 +736,25 @@ function stripHtml(value: string) {
     .trim();
 }
 
+async function responseTextLimit(response: Response, maxChars: number) {
+  const reader = response.body?.getReader();
+  if (!reader) return (await response.text()).slice(0, maxChars);
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    while (text.length < maxChars) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+    if (text.length >= maxChars) await reader.cancel().catch(() => undefined);
+  } catch {
+    await reader.cancel().catch(() => undefined);
+  }
+  return text.slice(0, maxChars);
+}
+
 async function fetchSourceSnippet(url: string) {
   if (!validUrl(url)) return "";
   const controller = new AbortController();
@@ -713,13 +770,261 @@ async function fetchSourceSnippet(url: string) {
       },
     });
     if (!liveSubmissionStatus(response.status)) return "";
-    const text = stripHtml(await response.text());
+    const text = stripHtml(await responseTextLimit(response, 24000));
     return text.slice(0, 2400);
   } catch {
     return "";
   } finally {
     clearTimeout(timeout);
   }
+}
+
+type SourceDocument = {
+  url: string;
+  text: string;
+  links: Array<{ text: string; url: string }>;
+};
+
+function absoluteUrl(value: string, baseUrl: string) {
+  try {
+    return new URL(value, baseUrl).toString();
+  } catch {
+    return "";
+  }
+}
+
+function extractLinks(html: string, baseUrl: string) {
+  const links: Array<{ text: string; url: string }> = [];
+  const anchorPattern = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = anchorPattern.exec(html)) !== null) {
+    const url = absoluteUrl(match[1], baseUrl).split("#")[0];
+    if (!validUrl(url)) continue;
+    const text = stripHtml(match[2]).slice(0, 120);
+    links.push({ text, url });
+  }
+  const seen = new Set<string>();
+  return links.filter((link) => {
+    const key = link.url.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 120);
+}
+
+async function fetchSourceDocument(url: string): Promise<SourceDocument | null> {
+  if (!validUrl(url)) return null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 7500);
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.6",
+        "user-agent": "QueryQuickBot/1.0 (+https://querysalon.com)",
+      },
+    });
+    if (!liveSubmissionStatus(response.status)) return null;
+    const finalUrl = response.url || url;
+    const html = await responseTextLimit(response, 60000);
+    return {
+      url: finalUrl,
+      text: stripHtml(html).slice(0, 6000),
+      links: extractLinks(html, finalUrl),
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function titleCaseFromSlug(value: string) {
+  return decodeURIComponent(value)
+    .replace(/\.[a-z0-9]+$/i, "")
+    .replace(/[-_+]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .map((word) => word ? `${word.charAt(0).toUpperCase()}${word.slice(1)}` : "")
+    .join(" ");
+}
+
+function looksLikePersonName(value: string) {
+  const text = clean(value)
+    .replace(/\s+[|\-–—]\s+.*$/, "")
+    .replace(/\b(literary agent|agent|author|mswl|querytracker|querymanager)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const normalized = normalizeSearchText(text);
+  if (!text || genericAgentLinkText.has(normalized)) return "";
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length > 5) return "";
+  if (words.some((word) => /\d/.test(word))) return "";
+  return text;
+}
+
+function agentNameFromSource(url: string, linkText = "") {
+  const fromText = looksLikePersonName(linkText);
+  if (fromText) return fromText;
+  try {
+    const parsed = new URL(url);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const markerIndex = parts.findIndex((part) => ["agent", "agents", "author", "mswl-post"].includes(part.toLowerCase()));
+    const slug = markerIndex >= 0 ? parts[markerIndex + 1] : parts[parts.length - 1];
+    return looksLikePersonName(titleCaseFromSlug(slug || ""));
+  } catch {
+    return "";
+  }
+}
+
+function agencyFromSource(url: string, pageText: string, fallback = "") {
+  try {
+    const parsed = new URL(url);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const agencyIndex = parts.findIndex((part) => part.toLowerCase() === "literary-agency");
+    if (agencyIndex >= 0 && parts[agencyIndex + 1]) {
+      const value = titleCaseFromSlug(parts[agencyIndex + 1])
+        .replace(/\bPs\b/g, "P.S.")
+        .replace(/\bPsliterary\b/i, "P.S. Literary");
+      return value.toLowerCase().includes("agency") ? value : `${value} Agency`;
+    }
+  } catch {
+    // Fall through to text/host inference.
+  }
+  const match = pageText.match(/\b([A-Z][A-Za-z&.' -]{2,70}(?:Literary|Agency|Management|Entertainment|Artists|Books|Media|Associates|Inc\.?))\b/);
+  if (match?.[1]) return match[1].trim();
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "").split(".")[0];
+    return titleCaseFromSlug(host).replace(/\bLit\b/g, "Literary") || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function queryMethodFromSourceUrl(url: string, pageText = ""): AgentRecord["query_method"] {
+  const lowerUrl = url.toLowerCase();
+  const lowerText = pageText.toLowerCase();
+  if (lowerUrl.includes("querymanager")) return "querymanager";
+  if (lowerUrl.includes("querytracker")) return "querytracker";
+  if (lowerUrl.includes("queryme.online")) return "portal";
+  if (lowerText.includes("email") && /\S+@\S+\.\S+/.test(pageText)) return "email";
+  if (lowerText.includes("form")) return "form";
+  return "portal";
+}
+
+function sourceUrlLooksAgentLike(url: string) {
+  const lower = url.toLowerCase();
+  return [
+    "/agent/",
+    "/agents/",
+    "/author/",
+    "/mswl-post/",
+    "querymanager.com/",
+    "queryme.online/",
+    "querytracker.net/agent/",
+  ].some((needle) => lower.includes(needle));
+}
+
+function emailFromText(value: string) {
+  return value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || "";
+}
+
+function sourceOnlyCandidateFromLead(
+  body: Record<string, unknown>,
+  leadUrl: string,
+  leadText: string,
+  sourceDoc: SourceDocument,
+  pageAgency: string
+): AgentCandidate | null {
+  if (!sourceUrlLooksAgentLike(leadUrl)) return null;
+  const agentName = agentNameFromSource(leadUrl, leadText);
+  if (!agentName) return null;
+  const agency = agencyFromSource(leadUrl, sourceDoc.text, pageAgency);
+  if (!agency) return null;
+  const queryMethod = queryMethodFromSourceUrl(leadUrl, sourceDoc.text);
+  const publicEmail = queryMethod === "email" ? emailFromText(sourceDoc.text) : "";
+  return {
+    agent_name: agentName,
+    agency,
+    genre_fit: clean(body.genre) || clean(body.category) || "Source-backed genre lane",
+    matched_genre: clean(body.genre),
+    matched_subgenre: clean(body.subgenre),
+    genre_evidence: `Validated source path mentions this agent in the ${clean(body.genre) || "requested"} lane.`,
+    subgenre_evidence: clean(body.subgenre)
+      ? `Source-only pass is tracking this path for ${clean(body.subgenre)}.`
+      : "Source-only pass is tracking this path for the requested genre lane.",
+    fit_reason: "Discovered from a validated public agent path; exact requirements will be refreshed from the source page.",
+    query_method: queryMethod,
+    submission_url: queryMethod === "email" ? "" : leadUrl,
+    public_email: publicEmail,
+    open_status: routePageSaysClosed(sourceDoc.text) ? "selective" : "open",
+    source_url: leadUrl,
+    source_urls: Array.from(new Set([sourceDoc.url, leadUrl])),
+    last_verified: nowIso(),
+    confidence_score: 58,
+  };
+}
+
+async function sourceOnlySeedUrls(env: Env, body: Record<string, unknown>, limit = 10) {
+  const direct = clean(body.source_url);
+  const normalizedGenre = normalizeSearchText(clean(body.genre));
+  const normalizedSubgenre = normalizeSearchText(clean(body.subgenre));
+  const laneText = normalizeSearchText([body.genre, body.subgenre].map(clean).filter(Boolean).join(" "));
+  const rows = await all<{ source_url: string }>(
+    env.DB,
+    `SELECT source_url
+     FROM quick_validated_agent_paths
+     WHERE status = 'watching'
+       AND (
+         ?1 = ''
+         OR ?2 = ''
+         OR normalized_genre = ?1
+         OR normalized_subgenre = ?2
+         OR lower(genre_lane) LIKE '%' || lower(?3) || '%'
+       )
+     ORDER BY priority DESC, open_agent_yield DESC, updated_at DESC
+     LIMIT ?4`,
+    [normalizedGenre, normalizedSubgenre, laneText, limit]
+  ).catch(() => [] as Array<{ source_url: string }>);
+  return Array.from(new Set([
+    direct,
+    ...rows.map((row) => row.source_url),
+  ].map(clean).filter(validUrl))).slice(0, limit);
+}
+
+async function sourceOnlyDiscoveryPass(env: Env, body: Record<string, unknown>) {
+  const seedUrls = await sourceOnlySeedUrls(env, body);
+  const docs = (await Promise.all(seedUrls.map(fetchSourceDocument))).filter((doc): doc is SourceDocument => Boolean(doc));
+  const rawCandidates: AgentCandidate[] = [];
+  for (const doc of docs) {
+    if (routePageSaysClosed(doc.text)) continue;
+    const pageAgency = agencyFromSource(doc.url, doc.text, "");
+    const direct = sourceOnlyCandidateFromLead(body, doc.url, "", doc, pageAgency);
+    if (direct) rawCandidates.push(direct);
+    for (const link of doc.links) {
+      const candidate = sourceOnlyCandidateFromLead(body, link.url, link.text, doc, pageAgency);
+      if (candidate) rawCandidates.push(candidate);
+    }
+  }
+  const excluded = new Set(
+    (Array.isArray(body.exclude_agents) ? body.exclude_agents : [])
+      .map(clean)
+      .map((value) => value.toLowerCase())
+      .filter(Boolean)
+  );
+  const filtered = rawCandidates.filter((candidate) => {
+    const key = `${candidate.agent_name} — ${candidate.agency}`.toLowerCase();
+    return !excluded.has(key);
+  });
+  return candidatesFromRaw(filtered, {
+    discovery_passes: docs.length,
+    search_result_count: seedUrls.length,
+    search_context_used: false,
+    source: "source_only_validated_paths",
+  });
 }
 
 async function buildGuidelineContext(agents: AgentRecord[]) {
@@ -734,7 +1039,7 @@ async function buildGuidelineContext(agents: AgentRecord[]) {
     if (!usable.length) {
       return `${index + 1}. ${agent.agent_name} — ${agent.agency}
 Route: ${submissionRouteUrl(agent)}
-No readable page snippet was available. Use live web search and public source pages to verify exact submission requirements.`;
+No readable page snippet was available. Do not infer requirements beyond the supplied candidate route.`;
     }
     return `${index + 1}. ${agent.agent_name} — ${agent.agency}
 Route: ${submissionRouteUrl(agent)}
@@ -1434,16 +1739,24 @@ function queuedDiscoveryLanes(body: Record<string, unknown>, resultCount: number
 }
 
 async function generateDiscoveryPass(env: Env, body: Record<string, unknown>) {
+  const sourceOnly = await sourceOnlyDiscoveryPass(env, body).catch(() => null);
   const providers: Array<{ name: string; run: Promise<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }> }> = [];
-  if (env.OPENAI_API_KEY) providers.push({ name: "OpenAI", run: generateAgentCandidates(env, body) });
-  if (env.GEMINI_API_KEY) providers.push({ name: "Gemini", run: generateGeminiCandidates(env, body) });
-  if (env.ANTHROPIC_API_KEY) providers.push({ name: "Claude", run: generateClaudeCandidates(env, body) });
-  if (env.AI && clean(body.search_context)) providers.push({ name: "Workers AI", run: generateWorkersAiCandidates(env, body) });
-  if (!providers.length) throw badRequest("Agent discovery is not configured. Add at least one AI provider key.", 503);
+  if (providerDiscoveryEnabled(env)) {
+    if (env.OPENAI_API_KEY) providers.push({ name: "OpenAI", run: generateAgentCandidates(env, body) });
+    if (env.GEMINI_API_KEY) providers.push({ name: "Gemini", run: generateGeminiCandidates(env, body) });
+    if (env.ANTHROPIC_API_KEY) providers.push({ name: "Claude", run: generateClaudeCandidates(env, body) });
+    if (env.AI && clean(body.search_context)) providers.push({ name: "Workers AI", run: generateWorkersAiCandidates(env, body) });
+  }
+  if (!providers.length) {
+    return sourceOnly
+      ? [{ status: "fulfilled", value: sourceOnly } satisfies PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>]
+      : [];
+  }
 
   const results = await Promise.allSettled(providers.map((provider) => provider.run));
   const fulfilled = results
     .filter((result): result is PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }> => result.status === "fulfilled");
+  if (sourceOnly) fulfilled.unshift({ status: "fulfilled", value: sourceOnly });
   if (!fulfilled.length) {
     const errors = await Promise.all(results.map(async (result, index) => {
       if (result.status === "fulfilled") return "";
@@ -1473,7 +1786,9 @@ async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>
       expanded_genres: genreExpansionTerms(body),
       exclude_agents: baseExcludeAgents.slice(0, 450),
     };
-    const snippetsPromise = searchSnippetsForLane(env, laneBody);
+    const snippetsPromise = providerDiscoveryEnabled(env)
+      ? searchSnippetsForLane(env, laneBody)
+      : Promise.resolve({ snippets: [], errors: [] } satisfies SearchSnippetResult);
     let baseResult: Array<PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>> = [];
     let baseError: unknown = null;
     try {
@@ -1505,6 +1820,7 @@ async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>
     };
     if (!snippets.length) {
       if (baseResult.length) return baseResult.map((providerResult) => withSearchDiagnostics(providerResult, false));
+      if (!providerDiscoveryEnabled(env)) return [];
       const providerError = await errorMessage(baseError, "Discovery did not return source leads.");
       const sourceError = searchProviderErrors.length ? ` Source search failed or returned no usable leads: ${searchProviderErrors.join(" | ")}` : " Source search returned no usable leads.";
       throw badRequest(`${providerError}${sourceError}`, 502);
@@ -1536,6 +1852,20 @@ async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>
     .filter((result): result is PromiseFulfilledResult<Array<PromiseFulfilledResult<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }>>> => result.status === "fulfilled")
     .flatMap((result) => result.value);
   if (!fulfilled.length) {
+    if (!providerDiscoveryEnabled(env)) {
+      return {
+        agents: [],
+        diagnostics: {
+          raw_count: 0,
+          candidate_count: 0,
+          verified_count: 0,
+          discovery_passes: lanes.length,
+          search_result_count: 0,
+          source_lanes: lanes.map((lane) => lane.id).join(","),
+          source: "source_only_validated_paths",
+        },
+      };
+    }
     const firstError = passResults.find((result): result is PromiseRejectedResult => result.status === "rejected")?.reason;
     throw firstError instanceof Response ? firstError : badRequest(firstError instanceof Error ? firstError.message : "Discovery timed out before returning candidates.", 504);
   }
@@ -1558,8 +1888,26 @@ async function generateLiveCandidatePool(env: Env, body: Record<string, unknown>
 }
 
 async function generateAgents(env: Env, body: Record<string, unknown>) {
-  if (!env.OPENAI_API_KEY && !env.AI) throw badRequest("Agent search is not configured yet. Missing OPENAI_API_KEY or Workers AI binding.", 503);
   const sourceCandidates = sourceCandidateList(body);
+  if (!sourceCandidates.length) {
+    return {
+      agents: [],
+      diagnostics: { raw_count: 0, candidate_count: 0, verified_count: 0, source: "no_source_candidates" },
+    };
+  }
+  if (!providerEnrichmentEnabled(env) || (!env.OPENAI_API_KEY && !env.AI)) {
+    const enriched = (await Promise.all(sourceCandidates.map(deterministicRequirementAgent))).map(normalizeAgent);
+    const candidates = filterAgents(enriched).map(normalizeAgent);
+    return {
+      agents: candidates,
+      diagnostics: {
+        raw_count: sourceCandidates.length,
+        candidate_count: candidates.length,
+        verified_count: candidates.length,
+        source: "deterministic_source_enrichment",
+      },
+    };
+  }
   if (sourceCandidates.length > ENRICHMENT_BATCH_SIZE) {
     const chunks = chunkArray(sourceCandidates, ENRICHMENT_BATCH_SIZE);
     const fulfilled: Array<{ agents: AgentRecord[]; diagnostics: AgentSearchDiagnostics }> = [];
@@ -1581,19 +1929,15 @@ async function generateAgents(env: Env, body: Record<string, unknown>) {
       },
     };
   }
-  const guidelineContext = sourceCandidates.length ? await buildGuidelineContext(sourceCandidates) : "";
-  const targetDirective = sourceCandidates.length
-    ? `Deep-index the exact submission requirements for every verified stage-one candidate supplied below. This is one internal batch from a larger saved pool; return every complete, usable enriched record in this batch, up to ${sourceCandidates.length}.`
-    : "Find the broadest useful pool of currently open literary agents using current public web sources. Do not stop at 25 or 50 when more relevant agents exist. Build toward the full genre/subgenre lane.";
-  const candidateDirective = sourceCandidates.length
-    ? `\n\nDEEP-INDEX THESE VERIFIED STAGE-ONE CANDIDATES ONLY:
+  const guidelineContext = await buildGuidelineContext(sourceCandidates);
+  const targetDirective = `Shape and normalize the exact submission requirements for every verified stage-one candidate supplied below. This is one internal batch from a larger saved pool; return every complete, usable enriched record in this batch, up to ${sourceCandidates.length}.`;
+  const candidateDirective = `\n\nSHAPE THESE VERIFIED STAGE-ONE CANDIDATES ONLY:
 ${sourceCandidates.map((agent, index) => `${index + 1}. ${agent.agent_name} — ${agent.agency} — ${submissionRouteUrl(agent)}`).join("\n")}
 
 Readable source context gathered from their route/source pages:
 ${guidelineContext}
 
-Do not add new agents in this stage. For each candidate, inspect the actual submission route and source snippets first, then use live web search only to fill gaps. Return enriched records with exact requirements, kit mapping, opener, and source notes.`
-    : "";
+Do not add new agents in this stage. Do not do broad discovery, live searching, or source expansion. Use the provided source snippets and candidate URLs to shape exact requirements, kit mapping, opener, and source notes.`;
   const prompt = `${targetDirective} Quality and live-open status matter more than volume, but do not under-return when valid candidates exist.
 
 Genre: ${clean(body.genre)}
@@ -1745,12 +2089,11 @@ query_letter, concise_description, synopsis, first_pages, sample_chapters, propo
       },
       body: JSON.stringify({
         model: clean(env.OPENAI_MODEL) || "gpt-5-mini",
-        tools: [{ type: "web_search_preview" }],
         input: [
           {
             role: "system",
             content:
-              "You generate Query Quick literary agent research records. Genre and subgenre accuracy is the first rule. Use current public sources and triangulate genre/subgenre fit plus submission details across multiple public pages whenever possible. Return JSON only. If required genre/subgenre evidence is missing, exclude the record. Do not guess.",
+              "You shape Query Quick literary agent research records from provided source context only. Genre and subgenre accuracy is the first rule. Triangulate genre/subgenre fit plus submission details across the supplied public source snippets whenever possible. Return JSON only. If required genre/subgenre evidence is missing, exclude the record. Do not guess and do not add newly discovered agents.",
           },
           { role: "user", content: prompt },
         ],
@@ -3246,7 +3589,7 @@ async function openAiEmbedding(env: Env, text: string) {
 }
 
 async function upsertWishlistVector(env: Env, agentId: string, agent: AgentRecord) {
-  if (!env.WISHLIST_INDEX || !env.OPENAI_API_KEY) return;
+  if (!providerEmbeddingsEnabled(env) || !env.WISHLIST_INDEX || !env.OPENAI_API_KEY) return;
   const text = wishlistSummaryForAgent(agent);
   if (!text) return;
   let embedding: number[] | null = null;

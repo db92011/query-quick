@@ -113,3 +113,6 @@ max_concurrency = 2
 
 [vars]
 APP_ORIGIN = "https://querysalon.com"
+ALLOW_PROVIDER_DISCOVERY = "false"
+ALLOW_PROVIDER_ENRICHMENT = "false"
+ALLOW_PROVIDER_EMBEDDINGS = "false"

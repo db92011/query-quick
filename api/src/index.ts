@@ -38,6 +38,9 @@ type Env = {
   GOOGLE_SEARCH_CX?: string;
   BING_SEARCH_API_KEY?: string;
   BING_SEARCH_ENDPOINT?: string;
+  ALLOW_PROVIDER_DISCOVERY?: string;
+  ALLOW_PROVIDER_ENRICHMENT?: string;
+  ALLOW_PROVIDER_EMBEDDINGS?: string;
   EMAIL_WEBHOOK_URL?: string;
   RESEND_API_KEY?: string;
   RESEND_FROM_EMAIL?: string;
