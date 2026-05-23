@@ -1,5 +1,13 @@
-const CACHE_NAME = "query-quick-app-v1";
-const APP_SHELL = ["/", "/quick", "/site.webmanifest", "/icons/icon-192.png", "/icons/icon-512.png"];
+const CACHE_NAME = "query-quick-app-v2";
+const APP_SHELL = [
+  "/",
+  "/quick",
+  "/site.webmanifest",
+  "/icons/apple-touch-icon.png",
+  "/icons/icon-192.png",
+  "/icons/icon-512.png",
+  "/icons/icon-1024.png",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL).catch(() => undefined)));
