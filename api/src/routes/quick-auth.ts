@@ -1,5 +1,6 @@
 import { badRequest, json, one, run } from "../lib/db";
 import { sessionResponse } from "../lib/auth";
+import { getQuickAccess, isEmail, isFreeAccessEmail, normalizeEmail } from "../lib/quick-access";
 
 type Env = {
   DB: D1Database;
@@ -8,6 +9,7 @@ type Env = {
   RESEND_API_KEY?: string;
   RESEND_FROM_EMAIL?: string;
   ALLOW_DEV_MAGIC_LINKS?: string;
+  QUERY_QUICK_FREE_ACCESS_EMAILS?: string;
 };
 
 type UserRow = {
@@ -25,25 +27,6 @@ type MagicLinkRow = {
 };
 
 const MAGIC_LINK_LIFETIME_HOURS = 6;
-const DEFAULT_FREE_ACCESS_EMAILS = ["danbrooking@gmail.com"];
-
-function normalizeEmail(value: unknown) {
-  return String(value || "").trim().toLowerCase();
-}
-
-function configuredFreeAccessEmails(env: Env) {
-  const configured = String((env as Env & { QUERY_QUICK_FREE_ACCESS_EMAILS?: string }).QUERY_QUICK_FREE_ACCESS_EMAILS || "").trim();
-  const emails = configured ? configured.split(/[\s,;]+/) : [];
-  return new Set([...DEFAULT_FREE_ACCESS_EMAILS, ...emails].map(normalizeEmail).filter(Boolean));
-}
-
-function isFreeAccessEmail(env: Env, email: string) {
-  return configuredFreeAccessEmails(env).has(normalizeEmail(email));
-}
-
-function isEmail(value: string) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-}
 
 function configuredOrigins(env: Env) {
   return String(env.APP_ORIGIN || "http://127.0.0.1:4174")
@@ -147,6 +130,12 @@ export async function handleQuickAuth(request: Request, env: Env, url: URL) {
   if (url.pathname === "/api/auth/magic/request") {
     const email = normalizeEmail(body.email);
     if (!isEmail(email)) return badRequest("A valid email is required.");
+    const origin = magicLinkOrigin(request, env);
+    const allowDevLink = env.ALLOW_DEV_MAGIC_LINKS === "true" || isLocalOrigin(origin);
+    const access = await getQuickAccess(env, email);
+    if (!access.active && !allowDevLink) {
+      return badRequest("Query Quick is $9.95/month. Subscribe first, or enter the email you used at Stripe.", 402);
+    }
 
     const token = crypto.randomUUID();
     const now = new Date();
@@ -158,10 +147,8 @@ export async function handleQuickAuth(request: Request, env: Env, url: URL) {
       now.toISOString(),
     ]);
 
-    const origin = magicLinkOrigin(request, env);
     const link = `${origin}/auth/verify?token=${encodeURIComponent(token)}`;
     const delivery = await sendMagicLink(env, email, link);
-    const allowDevLink = env.ALLOW_DEV_MAGIC_LINKS === "true" || isLocalOrigin(origin);
     return json({
       ok: true,
       delivered: delivery.delivered,
@@ -176,23 +163,31 @@ export async function handleQuickAuth(request: Request, env: Env, url: URL) {
     if (!row || row.used_at) return badRequest("This sign-in link is no longer valid.", 401);
     if (new Date(row.expires_at).getTime() < Date.now()) return badRequest("This sign-in link has expired.", 401);
 
+    const origin = magicLinkOrigin(request, env);
+    const allowDevLink = env.ALLOW_DEV_MAGIC_LINKS === "true" || isLocalOrigin(origin);
+    const access = await getQuickAccess(env, row.email);
+    if (!access.active && !allowDevLink) {
+      return badRequest("This email needs an active Query Quick subscription before sign-in.", 402);
+    }
     await run(env.DB, `UPDATE magic_links SET used_at = ?1 WHERE token = ?2`, [new Date().toISOString(), token]);
     const user = await upsertUser(env, row.email);
-    const subscriptionStatus = isFreeAccessEmail(env, row.email) ? "owner_free" : "trialing";
-    await run(
-      env.DB,
-      `INSERT INTO subscriptions_quick (user_id, status, updated_at)
-       VALUES (?1, ?2, ?3)
-       ON CONFLICT(user_id) DO UPDATE SET
-         status = CASE
-           WHEN subscriptions_quick.stripe_customer_id IS NULL
-             AND subscriptions_quick.stripe_subscription_id IS NULL
-           THEN excluded.status
-           ELSE subscriptions_quick.status
-         END,
-         updated_at = ?3`,
-      [user.id, subscriptionStatus, new Date().toISOString()]
-    );
+    if (isFreeAccessEmail(env, row.email)) {
+      await run(
+        env.DB,
+        `INSERT INTO subscriptions_quick (user_id, status, updated_at)
+         VALUES (?1, 'owner_free', ?2)
+         ON CONFLICT(user_id) DO UPDATE SET status = 'owner_free', updated_at = ?2`,
+        [user.id, new Date().toISOString()]
+      );
+    } else if (allowDevLink && access.status === "none") {
+      await run(
+        env.DB,
+        `INSERT INTO subscriptions_quick (user_id, status, updated_at)
+         VALUES (?1, 'dev_access', ?2)
+         ON CONFLICT(user_id) DO NOTHING`,
+        [user.id, new Date().toISOString()]
+      );
+    }
     return json(await createSession(env, user));
   }
 

@@ -19,7 +19,7 @@
   },
   "production": {
     "marketingUrl": "https://circlethepeople.com/query-quick/",
-    "installUrl": "https://querysalon.com/",
+    "installUrl": "https://querysalon.com/quick",
     "runtimeUrl": "https://querysalon.com/quick",
     "apiUrl": "https://quick-api.querysalon.com",
     "deployment": "cloudflare-pages-git"

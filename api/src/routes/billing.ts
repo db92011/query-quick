@@ -1,5 +1,6 @@
 import { requireSession } from "../lib/auth";
 import { badRequest, json, one, run } from "../lib/db";
+import { getQuickAccess, isEmail, isFreeAccessEmail, normalizeEmail } from "../lib/quick-access";
 
 type Env = {
   DB: D1Database;
@@ -15,22 +16,6 @@ type SubscriptionRow = {
 
 function clean(value: unknown) {
   return String(value || "").trim();
-}
-
-function normalizeEmail(value: unknown) {
-  return clean(value).toLowerCase();
-}
-
-const DEFAULT_FREE_ACCESS_EMAILS = ["danbrooking@gmail.com"];
-
-function configuredFreeAccessEmails(env: Env) {
-  const configured = clean(env.QUERY_QUICK_FREE_ACCESS_EMAILS);
-  const emails = configured ? configured.split(/[\s,;]+/) : [];
-  return new Set([...DEFAULT_FREE_ACCESS_EMAILS, ...emails].map(normalizeEmail).filter(Boolean));
-}
-
-function isFreeAccessEmail(env: Env, email: string) {
-  return configuredFreeAccessEmails(env).has(normalizeEmail(email));
 }
 
 async function stripeRequest<T>(env: Env, path: string, params: URLSearchParams): Promise<T> {
@@ -112,6 +97,14 @@ export async function handleBilling(request: Request, env: Env, url: URL) {
   if (request.method !== "POST") return badRequest("Method not allowed.", 405);
   const origin = String(env.APP_ORIGIN || "http://127.0.0.1:4174").replace(/\/$/, "");
 
+  if (url.pathname === "/api/billing/status") {
+    const body = await request.json().catch(() => ({})) as { email?: unknown };
+    const email = normalizeEmail(body.email);
+    if (!isEmail(email)) return badRequest("A valid email is required.");
+    const access = await getQuickAccess(env, email);
+    return json({ ok: true, ...access, checkoutRequired: !access.active });
+  }
+
   if (url.pathname === "/api/billing/checkout") {
     const body = await request.json().catch(() => ({})) as { email?: unknown };
     const email = normalizeEmail(body.email);
@@ -133,8 +126,10 @@ export async function handleBilling(request: Request, env: Env, url: URL) {
       mode: "subscription",
       "line_items[0][price]": priceId,
       "line_items[0][quantity]": "1",
-      success_url: `${origin}/quick?checkout=success`,
-      cancel_url: `${origin}/`,
+      success_url: email
+        ? `${origin}/quick?checkout=success&email=${encodeURIComponent(email)}`
+        : `${origin}/quick?checkout=success`,
+      cancel_url: `${origin}/quick?checkout=cancelled`,
       allow_promotion_codes: "true",
     });
     if (email) params.set("customer_email", email);

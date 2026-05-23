@@ -4,6 +4,13 @@ import { api, AuthProvider, type Session, useAuth } from "./lib";
 
 type QueryMethod = "email" | "querytracker" | "querymanager" | "form" | "portal";
 
+type BillingStatus = {
+  active: boolean;
+  freeAccess?: boolean;
+  status?: string;
+  checkoutRequired?: boolean;
+};
+
 type AgentRecord = {
   id?: string;
   agent_name: string;
@@ -646,19 +653,46 @@ function LoginGate() {
 
   if (session) return <Workspace />;
 
-  async function requestMagicLink(event: React.FormEvent) {
-    event.preventDefault();
+  async function sendMagicLink() {
     setStatus("Sending sign-in link...");
     setDevLink("");
+    const response = await api<{ ok: boolean; dev_magic_link?: string }>("/api/auth/magic/request", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+    setStatus("Check your email for the sign-in link. It will stay live for six hours.");
+    if (response.dev_magic_link) setDevLink(response.dev_magic_link);
+  }
+
+  async function continueWithAccess(event: React.FormEvent) {
+    event.preventDefault();
+    const normalizedEmail = email.trim();
+    if (!normalizedEmail) {
+      setStatus("Enter the email you use for Query Quick.");
+      return;
+    }
+
+    setStatus("Checking Query Quick access...");
+    setDevLink("");
     try {
-      const response = await api<{ ok: boolean; dev_magic_link?: string }>("/api/auth/magic/request", {
+      const access = await api<BillingStatus>("/api/billing/status", {
         method: "POST",
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email: normalizedEmail }),
       });
-      setStatus("Check your email for the sign-in link. It will stay live for six hours.");
-      if (response.dev_magic_link) setDevLink(response.dev_magic_link);
+
+      if (access.active) {
+        await sendMagicLink();
+        return;
+      }
+
+      setStatus("Opening Stripe checkout for Query Quick...");
+      const response = await api<{ url: string }>("/api/billing/checkout", {
+        method: "POST",
+        body: JSON.stringify({ email: normalizedEmail }),
+      });
+      window.location.href = response.url;
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not send sign-in link.");
+      setStatus(error instanceof Error ? error.message : "Could not continue Query Quick access.");
     }
   }
 
@@ -666,15 +700,16 @@ function LoginGate() {
     <main>
       <Header workspace />
       <section className="auth-panel">
-        <p className="kicker">{checkoutSuccess || freeCheckout ? "Access ready" : "Magic link login"}</p>
-        <h1>{checkoutSuccess || freeCheckout ? "Check your email for your Query Quick magic link." : "Open your Query Quick workspace."}</h1>
+        <p className="kicker">{checkoutSuccess || freeCheckout ? "Subscription ready" : "Query Quick access"}</p>
+        <h1>{checkoutSuccess || freeCheckout ? "Send your Query Quick magic link." : "Start or open Query Quick."}</h1>
         <p className="auth-copy">
-          Magic links stay live for six hours. After that, enter your email here and we’ll send another one.
+          Query Quick is $9.95/month. New users continue to Stripe. Returning subscribers enter
+          the same Stripe email here and we will send a six-hour magic link.
           {freeCheckout ? ` ${OWNER_FREE_ACCOUNT_EMAIL} is marked as the free owner account.` : ""}
         </p>
-        <form className="login-form" onSubmit={requestMagicLink}>
+        <form className="login-form" onSubmit={continueWithAccess}>
           <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" type="email" />
-          <button className="primary-button" type="submit">Send login link</button>
+          <button className="primary-button" type="submit">Continue</button>
         </form>
         {status ? <p className="status-line">{status}</p> : null}
         {devLink ? (
