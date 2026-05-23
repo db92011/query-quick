@@ -27,5 +27,21 @@
       "type": "image/png",
       "purpose": "any maskable"
     }
+  ],
+  "screenshots": [
+    {
+      "src": "/screenshots/query-quick-home-wide.png",
+      "sizes": "1280x720",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Query Quick landing page"
+    },
+    {
+      "src": "/screenshots/query-quick-install-mobile.png",
+      "sizes": "1170x1992",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "Query Quick install guidance"
+    }
   ]
 }

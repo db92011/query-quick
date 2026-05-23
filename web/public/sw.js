@@ -8,6 +8,8 @@ const APP_SHELL = [
   "/icons/icon-512.png",
   "/icons/icon-1024.png",
   "/icons/query-quick-icon.svg",
+  "/screenshots/query-quick-home-wide.png",
+  "/screenshots/query-quick-install-mobile.png",
 ];
 
 self.addEventListener("install", (event) => {
