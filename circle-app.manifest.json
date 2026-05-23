@@ -25,11 +25,11 @@
     "deployment": "cloudflare-pages-git"
   },
   "pwa": {
-    "manifestPath": "CircleThePeopleSite/query-quick/site.webmanifest",
-    "serviceWorkerPath": "CircleThePeopleSite/query-quick/sw.js",
-    "expectedStartUrl": "/query-quick/",
-    "scope": "/query-quick/",
-    "installShell": "/query-quick/",
+    "manifestPath": "query-quick/web/public/site.webmanifest",
+    "serviceWorkerPath": "query-quick/web/public/sw.js",
+    "expectedStartUrl": "/quick?source=pwa",
+    "scope": "/",
+    "installShell": "https://querysalon.com/quick",
     "iconPaths": [
       "CircleThePeopleSite/query-quick/icons/icon-192.png",
       "CircleThePeopleSite/query-quick/icons/icon-512.png",

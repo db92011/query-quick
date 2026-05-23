@@ -25,9 +25,20 @@ type MagicLinkRow = {
 };
 
 const MAGIC_LINK_LIFETIME_HOURS = 6;
+const DEFAULT_FREE_ACCESS_EMAILS = ["danbrooking@gmail.com"];
 
 function normalizeEmail(value: unknown) {
   return String(value || "").trim().toLowerCase();
+}
+
+function configuredFreeAccessEmails(env: Env) {
+  const configured = String((env as Env & { QUERY_QUICK_FREE_ACCESS_EMAILS?: string }).QUERY_QUICK_FREE_ACCESS_EMAILS || "").trim();
+  const emails = configured ? configured.split(/[\s,;]+/) : [];
+  return new Set([...DEFAULT_FREE_ACCESS_EMAILS, ...emails].map(normalizeEmail).filter(Boolean));
+}
+
+function isFreeAccessEmail(env: Env, email: string) {
+  return configuredFreeAccessEmails(env).has(normalizeEmail(email));
 }
 
 function isEmail(value: string) {
@@ -167,10 +178,20 @@ export async function handleQuickAuth(request: Request, env: Env, url: URL) {
 
     await run(env.DB, `UPDATE magic_links SET used_at = ?1 WHERE token = ?2`, [new Date().toISOString(), token]);
     const user = await upsertUser(env, row.email);
+    const subscriptionStatus = isFreeAccessEmail(env, row.email) ? "owner_free" : "trialing";
     await run(
       env.DB,
-      `INSERT OR IGNORE INTO subscriptions_quick (user_id, status, updated_at) VALUES (?1, 'trialing', ?2)`,
-      [user.id, new Date().toISOString()]
+      `INSERT INTO subscriptions_quick (user_id, status, updated_at)
+       VALUES (?1, ?2, ?3)
+       ON CONFLICT(user_id) DO UPDATE SET
+         status = CASE
+           WHEN subscriptions_quick.stripe_customer_id IS NULL
+             AND subscriptions_quick.stripe_subscription_id IS NULL
+           THEN excluded.status
+           ELSE subscriptions_quick.status
+         END,
+         updated_at = ?3`,
+      [user.id, subscriptionStatus, new Date().toISOString()]
     );
     return json(await createSession(env, user));
   }

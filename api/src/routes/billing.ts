@@ -6,6 +6,7 @@ type Env = {
   APP_ORIGIN?: string;
   STRIPE_SECRET_KEY?: string;
   STRIPE_PRICE_ID?: string;
+  QUERY_QUICK_FREE_ACCESS_EMAILS?: string;
 };
 
 type SubscriptionRow = {
@@ -18,6 +19,18 @@ function clean(value: unknown) {
 
 function normalizeEmail(value: unknown) {
   return clean(value).toLowerCase();
+}
+
+const DEFAULT_FREE_ACCESS_EMAILS = ["danbrooking@gmail.com"];
+
+function configuredFreeAccessEmails(env: Env) {
+  const configured = clean(env.QUERY_QUICK_FREE_ACCESS_EMAILS);
+  const emails = configured ? configured.split(/[\s,;]+/) : [];
+  return new Set([...DEFAULT_FREE_ACCESS_EMAILS, ...emails].map(normalizeEmail).filter(Boolean));
+}
+
+function isFreeAccessEmail(env: Env, email: string) {
+  return configuredFreeAccessEmails(env).has(normalizeEmail(email));
 }
 
 async function stripeRequest<T>(env: Env, path: string, params: URLSearchParams): Promise<T> {
@@ -100,6 +113,20 @@ export async function handleBilling(request: Request, env: Env, url: URL) {
   const origin = String(env.APP_ORIGIN || "http://127.0.0.1:4174").replace(/\/$/, "");
 
   if (url.pathname === "/api/billing/checkout") {
+    const body = await request.json().catch(() => ({})) as { email?: unknown };
+    const email = normalizeEmail(body.email);
+    if (isFreeAccessEmail(env, email)) {
+      const userId = await ensureQuickUser(env, email);
+      await run(
+        env.DB,
+        `INSERT INTO subscriptions_quick (user_id, status, updated_at)
+         VALUES (?1, 'owner_free', ?2)
+         ON CONFLICT(user_id) DO UPDATE SET status = 'owner_free', updated_at = ?2`,
+        [userId, new Date().toISOString()]
+      );
+      return json({ ok: true, url: `${origin}/quick?checkout=free&email=${encodeURIComponent(email)}` });
+    }
+
     const priceId = env.STRIPE_PRICE_ID;
     if (!priceId) return badRequest("Stripe price is not configured.", 503);
     const params = new URLSearchParams({
@@ -110,6 +137,7 @@ export async function handleBilling(request: Request, env: Env, url: URL) {
       cancel_url: `${origin}/`,
       allow_promotion_codes: "true",
     });
+    if (email) params.set("customer_email", email);
     const session = await stripeRequest<{ url: string }>(env, "checkout/sessions", params);
     return json({ ok: true, url: session.url });
   }

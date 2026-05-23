@@ -139,6 +139,8 @@ const emptyProfile: Profile = {
   word_count: "",
 };
 
+const OWNER_FREE_ACCOUNT_EMAIL = "danbrooking@gmail.com";
+
 const emptySubmissionKit: SubmissionKit = {
   manuscript_complete: false,
   query_letter: "",
@@ -479,7 +481,10 @@ function Home() {
           <button className="secondary-button large" type="button" onClick={() => setShowHow(true)}>See how it works</button>
         </div>
         {checkoutError ? <p className="status-line">{checkoutError}</p> : null}
-        <p className="fine-print">Payments are handled by Stripe.<br />We only store what's required to keep your account working.</p>
+        <p className="fine-print">
+          Payments are handled by Stripe.<br />
+          Free owner account: {OWNER_FREE_ACCOUNT_EMAIL}.
+        </p>
       </section>
 
       <section className="value-strip" id="how" aria-label="Query Quick benefits">
@@ -633,10 +638,11 @@ function SubscribeInstructions() {
 function LoginGate() {
   const { session, setSession } = useAuth();
   const [params] = useSearchParams();
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(() => params.get("email") || "");
   const [status, setStatus] = useState("");
   const [devLink, setDevLink] = useState("");
   const checkoutSuccess = params.get("checkout") === "success";
+  const freeCheckout = params.get("checkout") === "free";
 
   if (session) return <Workspace />;
 
@@ -660,10 +666,11 @@ function LoginGate() {
     <main>
       <Header workspace />
       <section className="auth-panel">
-        <p className="kicker">{checkoutSuccess ? "Subscription received" : "Magic link login"}</p>
-        <h1>{checkoutSuccess ? "Check your email for your Query Quick magic link." : "Open your Query Quick workspace."}</h1>
+        <p className="kicker">{checkoutSuccess || freeCheckout ? "Access ready" : "Magic link login"}</p>
+        <h1>{checkoutSuccess || freeCheckout ? "Check your email for your Query Quick magic link." : "Open your Query Quick workspace."}</h1>
         <p className="auth-copy">
           Magic links stay live for six hours. After that, enter your email here and we’ll send another one.
+          {freeCheckout ? ` ${OWNER_FREE_ACCOUNT_EMAIL} is marked as the free owner account.` : ""}
         </p>
         <form className="login-form" onSubmit={requestMagicLink}>
           <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" type="email" />
