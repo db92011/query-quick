@@ -328,6 +328,7 @@ a.secondary-button {
 
 .how-modal,
 .thanks-modal,
+.install-guide-modal,
 .intel-modal,
 .copy-specific-modal {
   position: relative;
@@ -342,6 +343,10 @@ a.secondary-button {
 
 .thanks-modal {
   width: min(520px, calc(100vw - 88px));
+}
+
+.install-guide-modal {
+  width: min(560px, calc(100vw - 88px));
 }
 
 .intel-modal {
@@ -366,6 +371,7 @@ a.secondary-button {
   line-height: 1.12;
 }
 
+.install-guide-modal h2,
 .intel-modal h2,
 .copy-specific-modal h2 {
   margin: 0;
@@ -1680,6 +1686,7 @@ a.secondary-button {
 
   .how-modal,
   .thanks-modal,
+  .install-guide-modal,
   .intel-modal,
   .copy-specific-modal {
     width: 100%;
@@ -1689,6 +1696,7 @@ a.secondary-button {
 
   .how-modal h2,
   .thanks-modal h2,
+  .install-guide-modal h2,
   .intel-modal h2,
   .copy-specific-modal h2 {
     font-size: 28px;

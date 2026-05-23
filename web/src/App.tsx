@@ -2,6 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { Navigate, Route, Routes, useNavigate, useSearchParams } from "react-router-dom";
 import { api, AuthProvider, type Session, useAuth } from "./lib";
 
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: string; platform?: string }>;
+};
+
 type QueryMethod = "email" | "querytracker" | "querymanager" | "form" | "portal";
 
 type BillingStatus = {
@@ -429,6 +434,79 @@ function Header({ workspace = false }: { workspace?: boolean }) {
   );
 }
 
+function InstallQueryQuickButton({ className = "secondary-button large" }: { className?: string }) {
+  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [showGuide, setShowGuide] = useState(false);
+
+  useEffect(() => {
+    function onBeforeInstallPrompt(event: Event) {
+      event.preventDefault();
+      setDeferredPrompt(event as BeforeInstallPromptEvent);
+    }
+
+    window.addEventListener("beforeinstallprompt", onBeforeInstallPrompt);
+    return () => window.removeEventListener("beforeinstallprompt", onBeforeInstallPrompt);
+  }, []);
+
+  useEffect(() => {
+    if (!showGuide) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setShowGuide(false);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [showGuide]);
+
+  async function installApp() {
+    if (!deferredPrompt) {
+      setShowGuide(true);
+      return;
+    }
+
+    await deferredPrompt.prompt();
+    await deferredPrompt.userChoice.catch(() => undefined);
+    setDeferredPrompt(null);
+  }
+
+  return (
+    <>
+      <button
+        id="nativeInstallButton"
+        className={className}
+        type="button"
+        data-install-action
+        data-pwa-install
+        aria-haspopup="dialog"
+        onClick={installApp}
+      >
+        Install Query Quick
+      </button>
+      {showGuide ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setShowGuide(false)}>
+          <section
+            className="install-guide-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="install-guide-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button className="modal-close" type="button" aria-label="Close" onClick={() => setShowGuide(false)}>Close</button>
+            <p className="kicker">Install steps</p>
+            <h2 id="install-guide-title">Add Query Quick to your Home Screen.</h2>
+            <p className="modal-note">
+              On iPhone or iPad, open this page in Safari, tap the Share button, then choose Add to Home Screen.
+              On Android, Chrome, or Edge, use the browser menu and choose Install app or Add to Home Screen.
+            </p>
+            <div className="modal-actions">
+              <button className="primary-button" type="button" onClick={() => setShowGuide(false)}>Got it</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 function Home() {
   const [waitlistEmail, setWaitlistEmail] = useState("");
   const [waitlistError, setWaitlistError] = useState("");
@@ -486,6 +564,7 @@ function Home() {
         <div className="hero-actions">
           <button className="primary-button large" type="button" onClick={checkout}>Start Query Quick - $9.95/mo</button>
           <button className="secondary-button large" type="button" onClick={() => setShowHow(true)}>See how it works</button>
+          <InstallQueryQuickButton />
         </div>
         {checkoutError ? <p className="status-line">{checkoutError}</p> : null}
         <p className="fine-print">
