@@ -1,0 +1,53 @@
+version: 2.1
+
+jobs:
+  web-build:
+    docker:
+      - image: cimg/node:22.11
+    working_directory: ~/project
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - query-quick-web-npm-v1-{{ checksum "web/package-lock.json" }}
+            - query-quick-web-npm-v1-
+      - run:
+          name: Install web dependencies
+          command: cd web && npm ci
+      - save_cache:
+          key: query-quick-web-npm-v1-{{ checksum "web/package-lock.json" }}
+          paths:
+            - ~/.npm
+      - run:
+          name: Check and build Query Quick web
+          command: cd web && npm run check && npm run build
+      - store_artifacts:
+          path: web/dist
+          destination: query-quick-web-dist
+
+  api-check:
+    docker:
+      - image: cimg/node:22.11
+    working_directory: ~/project
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - query-quick-api-npm-v1-{{ checksum "api/package-lock.json" }}
+            - query-quick-api-npm-v1-
+      - run:
+          name: Install API dependencies
+          command: cd api && npm ci
+      - save_cache:
+          key: query-quick-api-npm-v1-{{ checksum "api/package-lock.json" }}
+          paths:
+            - ~/.npm
+      - run:
+          name: Check Query Quick API
+          command: cd api && npm run check
+
+workflows:
+  query_quick_integrity:
+    jobs:
+      - web-build
+      - api-check
