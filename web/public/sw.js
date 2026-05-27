@@ -1,15 +1,15 @@
 const CACHE_NAME = "query-quick-app-v2";
 const APP_SHELL = [
-  "/",
-  "/quick",
-  "/site.webmanifest",
-  "/icons/apple-touch-icon.png",
-  "/icons/icon-192.png",
-  "/icons/icon-512.png",
-  "/icons/icon-1024.png",
-  "/icons/query-quick-icon.svg",
-  "/screenshots/query-quick-home-wide.png",
-  "/screenshots/query-quick-install-mobile.png",
+  "/app/",
+  "/app/?source=pwa",
+  "/app/site.webmanifest",
+  "/app/icons/apple-touch-icon.png",
+  "/app/icons/icon-192.png",
+  "/app/icons/icon-512.png",
+  "/app/icons/icon-1024.png",
+  "/app/icons/query-quick-icon.svg",
+  "/app/screenshots/query-quick-home-wide.png",
+  "/app/screenshots/query-quick-install-mobile.png",
 ];
 
 self.addEventListener("install", (event) => {
@@ -31,7 +31,7 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
   if (event.request.mode === "navigate") {
-    event.respondWith(fetch(event.request).catch(() => caches.match("/quick").then((cached) => cached || caches.match("/"))));
+    event.respondWith(fetch(event.request).catch(() => caches.match("/app/")));
     return;
   }
   event.respondWith(caches.match(event.request).then((cached) => cached || fetch(event.request)));

@@ -508,11 +508,8 @@ function InstallQueryQuickButton({ className = "secondary-button large" }: { cla
 }
 
 function Home() {
-  const [waitlistEmail, setWaitlistEmail] = useState("");
-  const [waitlistError, setWaitlistError] = useState("");
   const [checkoutError, setCheckoutError] = useState("");
   const [showHow, setShowHow] = useState(false);
-  const [showWaitlistThanks, setShowWaitlistThanks] = useState(false);
 
   async function checkout() {
     setCheckoutError("");
@@ -525,32 +522,13 @@ function Home() {
   }
 
   useEffect(() => {
-    if (!showHow && !showWaitlistThanks) return;
+    if (!showHow) return;
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setShowHow(false);
-        setShowWaitlistThanks(false);
-      }
+      if (event.key === "Escape") setShowHow(false);
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [showHow, showWaitlistThanks]);
-
-  async function joinWaitlist(event: React.FormEvent) {
-    event.preventDefault();
-    if (!waitlistEmail.trim()) return;
-    setWaitlistError("");
-    try {
-      await api("/api/waitlist", {
-        method: "POST",
-        body: JSON.stringify({ email: waitlistEmail, product: "query_salon_pro" }),
-      });
-      setWaitlistEmail("");
-      setShowWaitlistThanks(true);
-    } catch (error) {
-      setWaitlistError(error instanceof Error ? error.message : "Could not join the waitlist.");
-    }
-  }
+  }, [showHow]);
 
   return (
     <main>
@@ -577,25 +555,6 @@ function Home() {
         <div>Stop triangulating agent requirements the old way.</div>
         <div>Keep your submission materials organized locally in your workspace.</div>
         <div>Move from open-agent match to submission action in minutes.</div>
-      </section>
-
-      <section className="pro-band">
-        <div>
-          <p className="kicker">Future workspace</p>
-          <h2>Query Salon Pro</h2>
-          <p>Coming soon.</p>
-        </div>
-        <form className="waitlist-form" onSubmit={joinWaitlist}>
-          <input
-            aria-label="Email for Query Salon Pro waitlist"
-            value={waitlistEmail}
-            onChange={(event) => setWaitlistEmail(event.target.value)}
-            placeholder="Email address"
-            type="email"
-          />
-          <button className="secondary-button" type="submit">Join waitlist</button>
-          {waitlistError ? <span>{waitlistError}</span> : null}
-        </form>
       </section>
 
       <footer className="public-footer">
@@ -650,23 +609,6 @@ function Home() {
         </div>
       ) : null}
 
-      {showWaitlistThanks ? (
-        <div className="modal-backdrop" role="presentation" onClick={() => setShowWaitlistThanks(false)}>
-          <section
-            className="thanks-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="waitlist-thanks-title"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <button className="modal-close" type="button" aria-label="Close" onClick={() => setShowWaitlistThanks(false)}>Close</button>
-            <p className="kicker">Query Salon Pro</p>
-            <h2 id="waitlist-thanks-title">You’re on the waitlist.</h2>
-            <p>Thank you for joining. We’ll notify you when Query Salon Pro is ready and the next exciting event happens.</p>
-            <button className="primary-button" type="button" onClick={() => setShowWaitlistThanks(false)}>Got it</button>
-          </section>
-        </div>
-      ) : null}
     </main>
   );
 }

@@ -3,7 +3,7 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from "
 const configuredApiBase = (import.meta.env.VITE_API_BASE as string | undefined)?.trim();
 const API_BASE = configuredApiBase || (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
   ? "http://127.0.0.1:8789"
-  : "https://quick-api.querysalon.com");
+  : "https://circlethepeople.com/api/query-quick");
 const STORAGE_KEY = "query-quick.session";
 
 export type Role = "writer" | "agent";
